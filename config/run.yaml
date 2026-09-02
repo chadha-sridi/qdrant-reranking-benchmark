@@ -1,0 +1,92 @@
+# Global run configuration. Every value here lands in results/manifest.json.
+
+seeds:
+  query_subsample: 20250813   # picks the 500-query subsample
+  warmup_holdout: 20250813    # picks the warmup pool
+  plan_shuffle: 20250813      # execution-plan shuffle
+  muvera: 20250813            # SimHash + projection matrices
+
+queries:
+  # null = no cap: every dataset runs every judged query it has.
+  # Kept as a settable field because scripts/smoke.py and quick debugging runs need to
+  # limit queries; it is not a benchmark-configuration knob.
+  cap: null
+  # Held out from evaluation so no reported query is served from a warmup-warmed
+  # cache. NOT a train split — nothing here trains. Shrinks
+  # automatically on small query sets rather than starving evaluation.
+  warmup_count: 50
+
+execution:
+  repeats: 3                  # timing runs per query; quality from run_idx 0 only
+  final_limit: 10             # k for ndcg@10 / recall@10 / mrr@10
+  max_stored_results: 100     # capped to min(this, depth)
+  flush_every: 25             # fsync cadence on raw JSONL
+  # Default candidate depths, grounded in the measured relevant-docs-per-query
+  # distribution of the enabled datasets rather than picked by feel.
+  # Four of five datasets have every relevant document inside depth 50, so 200 is
+  # already ~4x past saturation and depth 500 would add a second flat point for 56% of
+  # the compute. NFCorpus overrides this upward in datasets.yaml — it is the one dataset
+  # still gaining at depth.
+  depths: [10, 25, 50, 100, 200]
+  # colbert_rescore and muvera_colbert each pay one extra, untimed Qdrant call per
+  # query to measure how many relevant docs survived their prefetch stage. Real added
+  # wall-clock cost (roughly doubles those two arms' own query-side work); no effect on
+  # any recorded latency. Set false to skip it and run faster.
+  capture_pool_recall: true
+
+qdrant:
+  url: "http://localhost:6333"
+  grpc_port: 6334
+  prefer_grpc: true
+  timeout_s: 120
+  image: "qdrant/qdrant:v1.19.0"
+  container_name: "reranking_benchmark_qdrant"
+  storage_path: "./qdrant_storage"
+  # Identical across all dense collections so graph construction variance is
+  # minimised.
+  hnsw:
+    m: 16
+    ef_construct: 100
+    # Always use the HNSW graph. Qdrant's default (10000 KB) would silently full-scan
+    # the two smallest datasets, so latency would compare ANN on the big corpora against
+    # brute force on the small ones. 10 is Qdrant's minimum accepted value (it rejects 0)
+    # and every segment here clears it. Does not affect ColBERT, whose m=0 means it has
+    # no graph to use in the first place.
+    full_scan_threshold_kb: 10
+  upsert_batch_size: 256
+  # Restored after the upload finishes, which is what triggers the HNSW build. Indexing
+  # is switched off during the upload itself. Qdrant's default is 20000 (KB).
+  indexing_threshold_kb: 20000
+  # Record Qdrant's own reported processing time alongside the client-observed round
+  # trip. 40-60% of the round trip is transport + deserialisation, not search, so this
+  # is what makes the client/server split defensible. Requires REST:
+  # enabling it forces prefer_grpc=false for the measured queries.
+  capture_server_time: true
+
+ingestion:
+  # Documents embedded and upserted together before moving to the next chunk. At this
+  # size peak embedding memory for the widest representation (MUVERA, 10,240-dim) is
+  # ~600 MB, independent of corpus size — Quora's 522,931 docs would otherwise need the
+  # full corpus resident across dense+colbert+muvera at once.
+  chunk_size: 10000
+
+# Every arm reranks the `dense` baseline, or a prefetch derived from it.
+# Hybrid-search/fusion arms and a BM25 sparse baseline are out of scope. All arms except
+# the baseline sweep candidate depth.
+arms:
+  enabled:
+    - dense              # arm 1: the unified baseline every other arm reranks
+    - quantized_rescore  # arm 2: TurboQuant search -> full-precision rescore
+    - colbert_rescore    # arm 3: dense prefetch -> ColBERT MaxSim
+    - muvera_colbert     # arm 4: MUVERA prefetch -> exact MaxSim
+    - cross_encoder      # arm 5: dense prefetch -> client-side cross-encoder
+  # Declared but gated. Flip via CLI flags, not by editing this list.
+  gated: {}
+
+paths:
+  results: "results"
+  raw: "results/raw"
+  agg: "results/agg"
+  queries: "results/queries"
+  cache: "cache"
+  manifest: "results/manifest.json"

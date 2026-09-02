@@ -1,0 +1,45 @@
+[project]
+name = "reranking-benchmark"
+version = "0.1.0"
+description = "Reproducible benchmark comparing reranking approaches in Qdrant"
+requires-python = ">=3.11"
+dependencies = [
+    # Pinned to the server minor version: the client warns and may misbehave when the
+    # minor versions diverge. Bump this together with the image tag in docker-compose.yml.
+    "qdrant-client>=1.19.0,<1.20",
+    "fastembed>=0.7.2,<0.8",  # 0.7.2 introduced postprocess.Muvera
+    "ranx>=0.3.20,<0.4",
+    "datasets>=3.0.0,<4",
+    "numpy>=1.26,<3",
+    "pandas>=2.2,<3",
+    "psutil>=6.0",
+    "pydantic>=2.8,<3",
+    "typer>=0.12,<0.20",
+    "pyyaml>=6.0",
+    "scipy>=1.13",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
+
+[project.scripts]
+benchmark = "src.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+# So bare `pytest` can import the `src` package without needing `python -m pytest` or
+# a manually-set PYTHONPATH (codex review: plain pytest failed import collection).
+# Renaming the package itself was declined as disproportionate to the problem — it
+# would touch every import, the CLI entry point, and every doc path for a one-line fix.
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "gate: validation gates for the benchmark's correctness invariants",
+    "slow: requires a live Qdrant and model downloads",
+]

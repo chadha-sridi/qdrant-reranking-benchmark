@@ -1,0 +1,23 @@
+# Image tag is pinned; the manifest records it and a result is only reproducible
+# against the exact image. No `platform` is set deliberately: Qdrant ships a
+# multi-arch manifest, and this file runs NATIVE to whatever host executes it (no
+# emulation), so latency is real for that machine (DECISIONS.md J1). spec.md section 1
+# asks for a fixed linux/amd64 target instead — use docker-compose.amd64.yml as an
+# override if you need to reproduce numbers on that architecture specifically.
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    container_name: reranking_benchmark_qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+    environment:
+      # Deterministic-ish index builds and a quiet log. Segment count is pinned so
+      # HNSW build variance (Gate 4) is measured against a fixed segmentation.
+      QDRANT__LOG_LEVEL: WARN
+      QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS: 4
+      QDRANT__TELEMETRY_DISABLED: "true"
+    # Memory measurement (spec.md section 5) reads container RSS, so no limit is set
+    # here; a cgroup cap would clip the number we are trying to observe.

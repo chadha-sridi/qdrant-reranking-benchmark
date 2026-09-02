@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Qdrant storage is wiped and rebuilt by the memory phase; never commit it.
+qdrant_storage/
+
+# Embeddings are platform-specific and must never be carried across architectures
+# (spec.md section 1). Regenerate on the target machine.
+cache/
+
+# Raw measurements and aggregates are run outputs. Commit them deliberately, per
+# published run, rather than incidentally.
+results/raw/
+results/agg/
+results/queries/
+!results/.gitkeep
+
+# Disposable smoke-test output (scripts/smoke.py) — same category as results/raw above.
+results_smoke/

@@ -1,0 +1,925 @@
+"""Unit tests for the parts that must be right before any live run.
+
+These run without Docker or model downloads.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from src.config import ExecutionConfig, load_config
+from src.datasets import IdMap, IdMapError, _hold_out_warmup, _subsample
+from src.metrics import (
+    _metric_supported,
+    kendall_tau_b,
+    latency_percentiles,
+    rbo,
+    top_k_overlap,
+)
+from src.storage import RawRecord, RawWriter, completed_keys, repair_truncated, unit_slug
+from src.timing import QueryTimers
+
+
+# ------------------------------------------------------------------------ config
+
+
+def test_config_loads_and_validates():
+    cfg = load_config()
+    assert cfg.models.colbert.hnsw_m == 0, "multivector HNSW must be disabled"
+    muvera = cfg.models.muvera
+    assert muvera.dim == muvera.n_reps * muvera.n_partitions * muvera.d_proj
+    assert cfg.run.execution.final_limit <= min(cfg.run.execution.depths)
+
+
+def test_muvera_calibration_flag_has_a_reason_recorded():
+    """Whatever `calibrated` is set to, the note must say why."""
+    cfg = load_config()
+    assert cfg.models.muvera.calibration_note, "calibration_note must explain the flag's basis"
+    if cfg.models.muvera.calibrated:
+        assert "calibrat" in cfg.models.muvera.calibration_note.lower()
+
+
+def test_muvera_calibration_gate_blocks_without_an_artifact_or_override():
+    """An uncalibrated MUVERA must not be silently runnable."""
+    from src.arms import muvera_calibration_status
+
+    cfg = load_config()
+    uncalibrated = cfg.model_copy(
+        update={
+            "models": cfg.models.model_copy(
+                update={"muvera": cfg.models.muvera.model_copy(update={"calibrated": False})}
+            )
+        }
+    )
+    ok, reason = muvera_calibration_status(uncalibrated, "__no_such_dataset__")
+    assert not ok
+    assert "calibrate-muvera" in reason
+
+
+def test_execution_config_rejects_depth_below_final_limit():
+    with pytest.raises(ValueError, match="prefetch.limit"):
+        ExecutionConfig(
+            repeats=1,
+            final_limit=10,
+            max_stored_results=100,
+            flush_every=5,
+            depths=[5, 10],
+        )
+
+
+def test_colbert_config_rejects_nonzero_m():
+    from src.config import ColbertModel
+
+    with pytest.raises(ValueError, match="hnsw_m must be 0"):
+        ColbertModel(
+            name="x", dim=128, distance="cosine", doc_max_tokens=300,
+            query_max_tokens=32, hnsw_m=16, comparator="max_sim",
+        )
+
+
+def test_dataset_set_is_the_agreed_five():
+    cfg = load_config()
+    assert set(cfg.datasets.datasets) == {"nfcorpus", "scifact", "scidocs", "fiqa", "quora"}
+    assert all(s.enabled for s in cfg.datasets.datasets.values()), "all five run by default"
+
+
+def test_no_dataset_caps_its_queries():
+    """Every dataset runs every judged query it has."""
+    cfg = load_config()
+    assert cfg.run.queries.cap is None, (
+        "the benchmark configuration must not cap queries; cap exists only so smoke "
+        "tests can limit them"
+    )
+
+
+def test_uncapped_subsample_returns_every_query_sorted():
+    ids = [f"q{i}" for i in range(1000)]
+    assert _subsample(ids, None, seed=1) == sorted(ids)
+
+
+def test_only_nfcorpus_sweeps_to_depth_500():
+    """NFCorpus is the only dataset still gaining quality past depth 200."""
+    cfg = load_config()
+    assert cfg.depths_for("nfcorpus") == [10, 25, 50, 100, 200, 500]
+    for name in ("scifact", "scidocs", "fiqa", "quora"):
+        assert cfg.depths_for(name) == [10, 25, 50, 100, 200], name
+        assert 500 not in cfg.depths_for(name)
+
+
+def test_enabled_datasets_are_ordered_smallest_first():
+    cfg = load_config()
+    sizes = [spec.corpus_size for spec in cfg.datasets.enabled_ordered]
+    assert sizes == sorted(sizes)
+
+
+# -------------------------------------------------------------------------- arms
+
+
+def test_registry_has_five_arms_and_no_hybrid_or_formula_arms():
+    """Every registered arm reranks the one unified dense baseline.
+
+    Hybrid-fusion arms (bm25/rrf/rrf_weighted/dbsf) and formula_rrf are out of scope:
+    they combine retrievers rather than rescore a candidate set, so they are not
+    reranking under this benchmark's scope.
+    """
+    from src.arms import REGISTRY
+
+    assert set(REGISTRY) == {
+        "dense", "quantized_rescore", "colbert_rescore", "muvera_colbert",
+        "cross_encoder",
+    }
+    assert "formula_rrf" not in REGISTRY
+    # Every arm except the baseline sweeps candidate depth.
+    assert {a.name for a in REGISTRY.values() if a.sweeps_depth} == {
+        "quantized_rescore", "colbert_rescore", "cross_encoder", "muvera_colbert",
+    }
+
+
+def test_pool_doc_ids_declared_only_where_cheap_or_meaningful():
+    """dense has no separate pool; quantized_rescore's pool isn't inspectable without
+    a second query it doesn't otherwise need. The other three expose one."""
+    from src.arms import REGISTRY
+
+    exposes_pool = {"colbert_rescore", "muvera_colbert", "cross_encoder"}
+    no_pool = {"dense", "quantized_rescore"}
+    assert exposes_pool | no_pool == set(REGISTRY)
+
+
+def test_pool_doc_ids_capture_is_untimed_and_config_gated(monkeypatch):
+    """The extra prefetch-alone call must land in a throwaway timer, never the arm's
+    own — corrupting the real latency measurement would defeat the point of it."""
+    from src.arms import ArmContext, QueryTimers, _pool_doc_ids
+    from src.config import load_config
+    from src.datasets import IdMap
+
+    cfg = load_config()
+    id_map = IdMap.build("d", ["docA", "docB"])
+    calls = []
+
+    class FakePoint:
+        def __init__(self, id_):
+            self.id = id_
+
+    class FakeClient:
+        capture_server_time = False
+
+        def query_points(self, **kwargs):
+            calls.append(kwargs)
+            return type("R", (), {"points": [FakePoint(0), FakePoint(1)]})()
+
+    ctx = ArmContext(
+        client=FakeClient(), cfg=cfg, encoders=None, id_map=id_map,
+        collection="c", dataset="d", capture_server_time=False,
+    )
+    real_timers = QueryTimers()
+    pool = _pool_doc_ids(ctx, query=[0.1], using="muvera", depth=10)
+
+    assert pool == ["docA", "docB"]
+    assert real_timers.n_qdrant_calls == 0, "the pool probe must not touch the real query's timers"
+    assert len(calls) == 1
+
+    # Disabled via config: no call at all, not just an untimed one.
+    disabled = cfg.model_copy(update={"run": cfg.run.model_copy(update={
+        "execution": cfg.run.execution.model_copy(update={"capture_pool_recall": False})
+    })})
+    ctx_disabled = ArmContext(
+        client=FakeClient(), cfg=disabled, encoders=None, id_map=id_map,
+        collection="c", dataset="d", capture_server_time=False,
+    )
+    assert _pool_doc_ids(ctx_disabled, query=[0.1], using="muvera", depth=10) is None
+    assert len(calls) == 1, "disabled must not issue the call at all"
+
+
+def test_resolve_arms_matches_the_five_arm_default_set():
+    cfg = load_config()
+    from src.arms import resolve_arms
+
+    arms, exclusions = resolve_arms(cfg, "nfcorpus")
+    assert not exclusions, f"unexpected exclusions: {exclusions}"
+    assert {a.name for a in arms} == set(cfg.run.arms.enabled)
+    assert set(cfg.run.arms.enabled) == {
+        "dense", "quantized_rescore", "colbert_rescore", "muvera_colbert", "cross_encoder",
+    }
+
+
+def test_per_dataset_depths_fall_back_to_the_global_sweep():
+    """Depths are per dataset, with a global default to fall back on."""
+    cfg = load_config()
+    # scifact sets no override, so it inherits the global sweep.
+    assert cfg.datasets.get("scifact").depths is None
+    assert cfg.depths_for("scifact") == cfg.run.execution.depths
+    # nfcorpus overrides, so it must NOT equal the global sweep.
+    assert cfg.datasets.get("nfcorpus").depths is not None
+    assert cfg.depths_for("nfcorpus") != cfg.run.execution.depths
+    # Whatever a dataset resolves to, no depth may fall below the reported limit.
+    for name in cfg.datasets.datasets:
+        assert min(cfg.depths_for(name)) >= cfg.run.execution.final_limit, name
+
+
+def test_depths_override_wins_over_every_dataset_own_override():
+    """`--depths` must win everywhere, including over a dataset's own `depths`.
+
+    A dataset that sets its own sweep (NFCorpus does) would otherwise silently ignore a
+    global-only override."""
+    cfg = load_config()
+    assert cfg.datasets.get("nfcorpus").depths is not None, "test assumes nfcorpus has its own override"
+    overridden = cfg.with_depths_override([10, 50])
+    assert overridden.depths_for("nfcorpus") == [10, 50]
+    assert overridden.depths_for("scifact") == [10, 50]
+
+
+def test_turboquant_bits_map_to_qdrant_enum():
+    from qdrant_client import models
+
+    cfg = load_config()
+    assert cfg.models.quantization.bits == "4", "4-bit is the configured default"
+    assert cfg.models.quantization.bit_size == models.TurboQuantBitSize.BITS4
+    assert cfg.models.quantization.memory_mode == models.Memory.PINNED
+
+
+def test_resolve_arms_excludes_by_missing_representation():
+    """A dataset that does not index a representation excludes the arms needing it."""
+    cfg = load_config()
+    from src.arms import resolve_arms
+
+    spec = cfg.datasets.get("nfcorpus")
+    dense_only = spec.model_copy(update={"representations": ["dense"]})
+    trimmed = cfg.model_copy(
+        update={
+            "datasets": cfg.datasets.model_copy(
+                update={"datasets": {**cfg.datasets.datasets, "nfcorpus": dense_only}}
+            )
+        }
+    )
+    _, exclusions = resolve_arms(trimmed, "nfcorpus", include=["dense", "colbert_rescore"])
+    assert "colbert_rescore" in exclusions
+
+
+# -------------------------------------------------------------- vector precision
+#
+# Every vector is read at fp32 except `quantized_rescore`, which is the whole point of
+# that arm. The dataset's collection attaches TurboQuant to `dense`, and Qdrant's default
+# is to USE quantization where configured, so a dense read that says nothing gets 4-bit
+# codes silently — which would put a rescoring arm's first stage on compressed codes
+# while the `dense` baseline it is compared against runs fp32. No metric would reveal
+# that, so these tests hold the invariant instead.
+
+
+def test_only_the_dense_vector_is_quantized():
+    """The precision guard's scope must match what vectors_config actually quantizes."""
+    from qdrant_client import models
+
+    from src.indexing import QUANTIZED_VECTORS, vectors_config
+
+    cfg = load_config()
+    spec = cfg.datasets.get("nfcorpus")
+    config = vectors_config(cfg, spec, ["dense", "colbert", "muvera"])
+
+    quantized = {
+        name: params for name, params in config.items() if params.quantization_config is not None
+    }
+    assert set(quantized) == set(QUANTIZED_VECTORS) == {"dense"}
+    assert isinstance(config["dense"].quantization_config, models.TurboQuantization)
+
+
+def test_full_precision_params_bypass_quantization():
+    from src.arms import dense_prefetch, full_precision
+
+    assert full_precision().quantization.ignore is True
+
+    prefetch = dense_prefetch([0.1, 0.2], limit=50)
+    assert prefetch.using == "dense"
+    assert prefetch.limit == 50
+    assert prefetch.params.quantization.ignore is True
+
+
+def test_undeclared_precision_on_a_quantized_vector_is_rejected():
+    """Forgetting the params must fail loudly, not silently search compressed codes."""
+    from src.arms import ArmError, _assert_precision_declared, _check_prefetch_precision
+    from qdrant_client import models
+
+    with pytest.raises(ArmError, match="without declaring a precision"):
+        _assert_precision_declared("dense", None, "query")
+
+    # SearchParams present but silent about quantization is still undeclared.
+    with pytest.raises(ArmError, match="without declaring a precision"):
+        _assert_precision_declared("dense", models.SearchParams(hnsw_ef=128), "query")
+
+    with pytest.raises(ArmError, match="without declaring a precision"):
+        _check_prefetch_precision(
+            [models.Prefetch(query=[0.1], using="dense", limit=10)], "query"
+        )
+
+    # Nested prefetch stages are checked too, not just the outermost one.
+    with pytest.raises(ArmError, match="without declaring a precision"):
+        _check_prefetch_precision(
+            models.Prefetch(
+                query=[0.1],
+                using="muvera",
+                limit=10,
+                prefetch=models.Prefetch(query=[0.1], using="dense", limit=10),
+            ),
+            "query",
+        )
+
+
+def test_declared_precision_is_accepted_in_both_directions():
+    """Explicit fp32 and the deliberate TurboQuant opt-in both pass the guard."""
+    from src.arms import _assert_precision_declared, _check_prefetch_precision, dense_prefetch, full_precision
+    from qdrant_client import models
+
+    _assert_precision_declared("dense", full_precision(), "query")
+    _assert_precision_declared(
+        "dense",
+        models.SearchParams(
+            quantization=models.QuantizationSearchParams(
+                ignore=False, rescore=True, oversampling=2.0
+            )
+        ),
+        "query",
+    )
+    _check_prefetch_precision([dense_prefetch([0.1], limit=10)], "query")
+
+    # Unquantized vectors need no declaration at all.
+    _assert_precision_declared("colbert", None, "query")
+    _check_prefetch_precision([models.Prefetch(query=[0.1], using="muvera", limit=10)], "query")
+
+
+def test_query_kwargs_are_valid_on_both_transports():
+    """`params` is REST-only naming; the client method calls it `search_params`.
+
+    run_query feeds one kwargs dict to whichever transport is active, so without the
+    translation an arm that declares search params fails with "Unknown arguments:
+    ['params']" whenever capture_server_time is off. Both spellings must work.
+    """
+    import inspect
+
+    from qdrant_client import QdrantClient, models
+
+    from src.arms import _for_client_method, full_precision
+
+    arm_kwargs = {
+        "query": [0.1, 0.2],
+        "using": "dense",
+        "limit": 10,
+        "with_payload": ["doc_id"],
+        "params": full_precision(),
+    }
+
+    # REST path: the model accepts the arm's own vocabulary.
+    assert models.QueryRequest(**arm_kwargs).params.quantization.ignore is True
+
+    # Client-method path: translated names must all exist in the real signature.
+    translated = _for_client_method(arm_kwargs)
+    accepted = set(inspect.signature(QdrantClient.query_points).parameters)
+    unknown = set(translated) - accepted
+    assert not unknown, f"kwargs the client method would reject: {sorted(unknown)}"
+    assert translated["search_params"].quantization.ignore is True
+    assert "params" not in translated
+
+
+def test_full_scan_threshold_is_a_value_qdrant_accepts():
+    """Qdrant rejects full_scan_threshold=0 with "must be 10 or larger".
+
+    Set to 0, every create_collection call fails at runtime with a 422 — and no fast
+    test would notice, because they do not build collections.
+    """
+    from src.config import HnswConfig, load_config
+
+    cfg = load_config()
+    assert cfg.run.qdrant.hnsw.full_scan_threshold_kb >= 10
+
+    with pytest.raises(ValueError, match="10 or larger"):
+        HnswConfig(m=16, ef_construct=100, full_scan_threshold_kb=0)
+
+
+def test_the_index_is_always_used_not_full_scanned():
+    """Qdrant's 10000 KB default would full-scan the two smallest datasets.
+
+    Latency would then compare ANN on the big corpora against brute force on the small
+    ones, which is not a corpus-size curve.
+    """
+    from src.config import load_config
+
+    cfg = load_config()
+    assert cfg.run.qdrant.hnsw.full_scan_threshold_kb < 10_000
+
+
+# ------------------------------------------------------------- ingestion integrity
+
+
+def test_verify_ingestion_rejects_a_short_collection():
+    """Silent under-ingestion inflates latency and deflates recall; it must not pass."""
+    from src.indexing import IngestionError, verify_ingestion
+
+    class ShortClient:
+        def count(self, collection_name, exact):
+            return type("C", (), {"count": 1098})()
+
+    with pytest.raises(IngestionError, match="1098 points present, expected 3633"):
+        verify_ingestion(ShortClient(), "c", expected_points=3633)
+
+
+def test_verify_ingestion_rejects_an_unindexed_collection():
+    """indexing_threshold=0 reports green with no HNSW built: brute-force latency."""
+    from qdrant_client import models
+
+    from src.indexing import IngestionError, verify_ingestion
+
+    class UnindexedClient:
+        def count(self, collection_name, exact):
+            return type("C", (), {"count": 10})()
+
+        def get_collection(self, name):
+            return type(
+                "I",
+                (),
+                {
+                    "status": models.CollectionStatus.GREEN,
+                    "config": type(
+                        "Cfg", (), {"optimizer_config": type("O", (), {"indexing_threshold": 0})()}
+                    )(),
+                },
+            )()
+
+    with pytest.raises(IngestionError, match="indexing_threshold is 0"):
+        verify_ingestion(UnindexedClient(), "c", expected_points=10)
+
+    # Tolerated where there are no vectors to index (the payload-only baseline).
+    verify_ingestion(UnindexedClient(), "c", expected_points=10, require_indexed=False)
+
+
+def test_ingestion_resume_targets_only_the_missing_points():
+    """Resume must re-send exactly the gap — deterministic ids make that non-duplicating."""
+    from src.indexing import _missing_point_indices
+
+    class PartialClient:
+        """Holds points 0..99; 100..149 never landed."""
+
+        def retrieve(self, collection_name, ids, with_payload, with_vectors):
+            return [type("P", (), {"id": i})() for i in ids if i < 100]
+
+    missing = _missing_point_indices(PartialClient(), "c", list(range(150)))
+    assert missing == list(range(100, 150))
+
+
+def test_missing_point_indices_scopes_to_a_chunk_not_the_whole_corpus():
+    """The chunked ingestion path checks one chunk's ids, not a full-corpus scan."""
+    from src.indexing import _missing_point_indices
+
+    class PartialClient:
+        """Holds points 0..99 only."""
+
+        def __init__(self):
+            self.seen_ids: list[int] = []
+
+        def retrieve(self, collection_name, ids, with_payload, with_vectors):
+            self.seen_ids.extend(ids)
+            return [type("P", (), {"id": i})() for i in ids if i < 100]
+
+    client = PartialClient()
+    # A later chunk, entirely missing: only its own ids should ever be checked.
+    missing = _missing_point_indices(client, "c", list(range(200, 210)))
+    assert missing == list(range(200, 210))
+    assert set(client.seen_ids) == set(range(200, 210))
+
+
+def test_point_from_chunk_uses_global_index_for_the_document_and_local_index_for_the_vector():
+    """A chunk starting mid-corpus must not silently overwrite an earlier chunk's points.
+
+    `chunk_vectors` is indexed from 0 within the chunk; `bundle.documents` and
+    `bundle.id_map` are indexed globally. Conflating the two makes every chunk after
+    the first fetch the wrong document while attaching a point id that collides with
+    an earlier chunk's, silently overwriting it instead of adding a new point.
+    """
+    import numpy as np
+
+    from src.datasets import Document, IdMap
+    from src.indexing import DocumentVectors, _point_from_chunk
+
+    n_docs = 10
+    doc_ids = [f"doc{i}" for i in range(n_docs)]
+    documents = [Document(doc_id=d, text=f"text-{d}") for d in doc_ids]
+    id_map = IdMap.build("fake", doc_ids)
+
+    class FakeBundle:
+        pass
+
+    bundle = FakeBundle()
+    bundle.documents = documents
+    bundle.id_map = id_map
+
+    chunk_start, chunk_end = 5, 10  # second chunk of a 5-doc-per-chunk split
+    # Distinguishable per-position values so a local/global index mix-up is visible.
+    chunk_vectors = DocumentVectors(dense=np.arange(chunk_start, chunk_end).reshape(-1, 1).astype("float32"))
+
+    global_i = 7  # doc7, third position in this chunk (local_i = 2)
+    point = _point_from_chunk(bundle, chunk_vectors, ["dense"], global_i, chunk_start)
+
+    assert point.payload["doc_id"] == "doc7"
+    assert point.id == id_map.point("doc7")
+    assert point.vector["dense"] == [7.0]  # chunk_vectors[local_i=2] == arange(5,10)[2] == 7
+
+
+def test_chunk_bounds_covers_the_corpus_exactly_once():
+    from src.indexing import _chunk_bounds
+
+    bounds = _chunk_bounds(25, 10)
+    assert bounds == [(0, 10), (10, 20), (20, 25)]
+    covered = [i for start, end in bounds for i in range(start, end)]
+    assert covered == list(range(25))
+
+    # A corpus smaller than one chunk is a single chunk, not a special case.
+    assert _chunk_bounds(5, 10) == [(0, 5)]
+
+
+# --------------------------------------------------------------- embedding cache
+
+
+def test_cache_save_is_atomic_no_torn_file_is_ever_visible(tmp_path, monkeypatch):
+    """A crash mid-write must leave either the old complete file or nothing — never a
+    truncated one that a resume would load as valid."""
+    import numpy as np
+
+    from src.embedding import EmbeddingCache
+
+    cache = EmbeddingCache(tmp_path)
+    key = "testkey"
+    vectors = np.ones((10, 4), dtype=np.float32)
+
+    original_replace = __import__("os").replace
+    calls = []
+
+    def _boom(*a, **k):
+        calls.append(a)
+        raise OSError("simulated crash before publish")
+
+    import os as os_module
+
+    monkeypatch.setattr(os_module, "replace", _boom)
+    with pytest.raises(OSError):
+        cache.save_dense(key, vectors, {"model": "m", "dataset": "d"})
+    monkeypatch.setattr(os_module, "replace", original_replace)
+
+    # The publish step never ran, so nothing resume-visible exists — not a half file.
+    assert cache.load_dense(key) is None
+    data_path = cache._data_path(key, ".dense.npy")
+    assert not data_path.exists()
+    tmp_files = list(tmp_path.glob("*.tmp"))
+    assert tmp_files, "expected the temp file to exist, orphaned by the simulated crash"
+
+    # A subsequent successful save is unaffected by the earlier failed attempt.
+    cache.save_dense(key, vectors, {"model": "m", "dataset": "d"})
+    loaded = cache.load_dense(key)
+    assert loaded is not None
+    np.testing.assert_array_equal(loaded, vectors)
+
+
+def test_cache_key_differs_per_chunk_bounds():
+    """Two chunks of the same dataset/model/digest must not collide in the cache."""
+    from src.embedding import EmbeddingCache
+
+    cache = EmbeddingCache.__new__(EmbeddingCache)  # key() touches no disk
+    common = dict(representation="dense", model_name="m", dataset="d", corpus_digest="x")
+    key_a = cache.key(**common, extra={"chunk_start": 0, "chunk_end": 100})
+    key_b = cache.key(**common, extra={"chunk_start": 100, "chunk_end": 200})
+    assert key_a != key_b
+
+
+# ----------------------------------------------------------------------- indexing
+
+
+def _with_grpc(cfg, prefer_grpc: bool):
+    qdrant = cfg.run.qdrant.model_copy(update={"prefer_grpc": prefer_grpc})
+    return cfg.model_copy(update={"run": cfg.run.model_copy(update={"qdrant": qdrant})})
+
+
+def test_upsert_batch_is_capped_below_qdrant_payload_limit():
+    """A fixed batch of wide MUVERA vectors exceeds Qdrant's 32 MiB request ceiling.
+
+    256 points x 10,240 float32 dims serialises to ~48 MB as JSON and the upsert fails
+    with a 400. The batch must shrink with the vector width.
+    """
+    from src.indexing import DocumentVectors, safe_batch_size
+
+    cfg = load_config()
+    reps = ["dense", "colbert", "muvera"]
+    vectors = DocumentVectors(n_token_vectors=12 * 200)
+
+    http = safe_batch_size(_with_grpc(cfg, False), vectors, reps, 200)
+    grpc = safe_batch_size(_with_grpc(cfg, True), vectors, reps, 200)
+
+    assert 1 <= http <= cfg.run.qdrant.upsert_batch_size
+    assert http < cfg.run.qdrant.upsert_batch_size, "JSON transport must shrink the batch"
+    assert grpc >= http, "binary transport fits more points per request"
+
+    # The whole point: the resulting request stays under the limit.
+    from src.indexing import estimate_point_floats
+
+    floats = estimate_point_floats(cfg, vectors, reps, 200)
+    assert http * floats * 14 < 32 * 1024**2
+
+
+def test_the_dense_vector_always_carries_quantization():
+    """quantized_rescore needs the codes present however few vectors are requested.
+
+    A dense vector built without the quantization config would leave that arm searching
+    fp32 while reporting itself as the TurboQuant arm, and its cost would vanish from the
+    memory table (Qdrant reports it as the `dense` vector's `quantized` component).
+    """
+    from src.indexing import vectors_config
+
+    cfg = load_config()
+    spec = cfg.datasets.get("nfcorpus")
+
+    for reps in (["dense"], ["dense", "colbert", "muvera"]):
+        config = vectors_config(cfg, spec, reps)
+        assert config["dense"].quantization_config is not None, reps
+
+
+def test_upsert_batch_respects_configured_ceiling_for_narrow_vectors():
+    from src.indexing import DocumentVectors, safe_batch_size
+
+    cfg = load_config()
+    batch = safe_batch_size(_with_grpc(cfg, True), DocumentVectors(), ["dense"], 100)
+    assert batch == cfg.run.qdrant.upsert_batch_size
+
+
+# ---------------------------------------------------------------------- id mapping
+
+
+def test_id_map_roundtrips():
+    id_map = IdMap.build("test", ["MED-1", "MED-2", "MED-3"])
+    assert id_map.point("MED-2") == 1
+    assert id_map.doc(1) == "MED-2"
+    assert len(id_map) == 3
+
+
+def test_id_map_rejects_duplicates():
+    with pytest.raises(IdMapError, match="duplicate doc_ids"):
+        IdMap.build("test", ["a", "b", "a"])
+
+
+def test_id_map_rejects_unknown_ids():
+    id_map = IdMap.build("test", ["a"])
+    with pytest.raises(IdMapError, match="not in corpus"):
+        id_map.point("zzz")
+    with pytest.raises(IdMapError, match="not in map"):
+        id_map.doc(99)
+
+
+def test_id_map_persists_and_detects_tampering(tmp_path):
+    id_map = IdMap.build("test", [f"doc-{i}" for i in range(10)])
+    path = tmp_path / "map.json"
+    id_map.save(path)
+    assert IdMap.load(path).digest == id_map.digest
+
+    payload = json.loads(path.read_text())
+    payload["doc_ids"][0] = "tampered"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(IdMapError, match="digest mismatch"):
+        IdMap.load(path)
+
+
+# ------------------------------------------------------------- sampling and splits
+
+
+def test_subsample_is_seed_stable_and_capped():
+    ids = [f"q{i}" for i in range(1000)]
+    a = _subsample(ids, 500, seed=42)
+    b = _subsample(ids, 500, seed=42)
+    c = _subsample(ids, 500, seed=43)
+    assert a == b and len(a) == 500
+    assert a != c
+
+
+def test_subsample_returns_everything_below_the_cap():
+    ids = [f"q{i}" for i in range(300)]
+    assert _subsample(ids, 500, seed=1) == sorted(ids)
+
+
+def test_warmup_holdout_is_disjoint_and_stable():
+    """No training happens — warmup is a cache holdout, not a train split."""
+    ids = [f"q{i}" for i in range(400)]
+    warm_a, eval_a = _hold_out_warmup(ids, 50, seed=9)
+    warm_b, eval_b = _hold_out_warmup(ids, 50, seed=9)
+    assert (warm_a, eval_a) == (warm_b, eval_b)
+    assert not set(warm_a) & set(eval_a), "warmup and evaluated sets must not overlap"
+    assert len(warm_a) + len(eval_a) == len(ids)
+    assert len(warm_a) == 50
+    # The evaluated set keeps almost everything.
+    assert len(eval_a) == 350
+
+
+def test_warmup_shrinks_rather_than_starving_a_small_query_set():
+    """A 50-query dataset must not lose its whole evaluation set to warmup."""
+    ids = [f"q{i}" for i in range(50)]
+    warm, evaluated = _hold_out_warmup(ids, 50, seed=1)
+    assert len(warm) <= len(ids) // 3
+    assert len(evaluated) >= 34, "most of a small query set must still be evaluated"
+
+
+# ------------------------------------------------------------------------ timing
+
+
+def test_timers_accumulate_independently():
+    timers = QueryTimers()
+    with timers.embed():
+        pass
+    with timers.qdrant():
+        pass
+    with timers.qdrant():
+        pass
+    payload = timers.as_dict()
+    assert payload["n_qdrant_calls"] == 2
+    assert payload["t_rerank_ms"] == 0.0
+    assert payload["t_total_ms"] == pytest.approx(
+        payload["t_embed_ms"] + payload["t_qdrant_ms"] + payload["t_rerank_ms"], abs=1e-3
+    )
+
+
+def test_server_time_is_tracked_separately_from_the_round_trip():
+    """40-60% of a round trip is transport + deserialisation, not search."""
+    timers = QueryTimers()
+    with timers.qdrant():
+        pass
+    timers.t_qdrant_ms = 10.0
+    timers.add_server_time(0.004)  # 4 ms reported by Qdrant
+    assert timers.t_qdrant_server_ms == pytest.approx(4.0)
+    assert timers.t_qdrant_overhead_ms == pytest.approx(6.0)
+    payload = timers.as_dict()
+    assert payload["t_qdrant_server_ms"] == pytest.approx(4.0)
+    assert payload["t_qdrant_overhead_ms"] == pytest.approx(6.0)
+    # Server time is not double counted into the total.
+    assert payload["t_total_ms"] == pytest.approx(10.0)
+
+
+def test_server_time_is_none_when_transport_does_not_report_it():
+    timers = QueryTimers()
+    timers.add_server_time(None)
+    assert timers.t_qdrant_server_ms is None
+    assert timers.t_qdrant_overhead_ms is None
+    assert timers.as_dict()["t_qdrant_server_ms"] is None
+
+
+def test_server_time_accumulates_over_multiple_round_trips():
+    timers = QueryTimers()
+    timers.add_server_time(0.002)
+    timers.add_server_time(0.003)
+    assert timers.t_qdrant_server_ms == pytest.approx(5.0)
+
+
+def test_query_client_drops_to_rest_when_capturing_server_time():
+    """gRPC discards Qdrant's time field, so capture requires REST."""
+    from src.indexing import build_client
+
+    cfg = load_config()
+    assert cfg.run.qdrant.capture_server_time is True
+    assert cfg.run.qdrant.prefer_grpc is True, "indexing should still prefer gRPC"
+    # Indexing keeps gRPC; only the query client is forced to REST.
+    assert build_client(cfg, for_queries=False)._client._prefer_grpc is True
+    assert build_client(cfg, for_queries=True)._client._prefer_grpc is False
+
+
+def test_latency_components_include_the_server_split():
+    from src.metrics import LATENCY_COMPONENTS
+
+    assert "t_qdrant_server_ms" in LATENCY_COMPONENTS
+    assert "t_qdrant_overhead_ms" in LATENCY_COMPONENTS
+
+
+def test_timers_record_time_even_on_exception():
+    timers = QueryTimers()
+    with pytest.raises(RuntimeError):
+        with timers.qdrant():
+            raise RuntimeError("boom")
+    assert timers.n_qdrant_calls == 1
+
+
+# ------------------------------------------------------------------------ storage
+
+
+def test_unit_slug_uses_none_not_zero_for_non_sweeping_arms():
+    assert unit_slug("nfcorpus", "dense", None) == "nfcorpus__dense__depth-none"
+    assert unit_slug("nfcorpus", "colbert_rescore", 100) == "nfcorpus__colbert_rescore__depth-100"
+
+
+def test_raw_writer_appends_and_resume_reads_back(tmp_path):
+    with RawWriter(tmp_path, flush_every=1) as writer:
+        for run_idx in range(2):
+            writer.write(
+                RawRecord(
+                    query_id="PLAIN-2",
+                    arm="dense",
+                    dataset="nfcorpus",
+                    depth=None,
+                    run_idx=run_idx,
+                    retrieved=[("MED-1", 0.9)],
+                    timers=QueryTimers(),
+                )
+            )
+    done = completed_keys(tmp_path, "nfcorpus")
+    assert ("dense", None, "PLAIN-2", 0) in done
+    assert ("dense", None, "PLAIN-2", 1) in done
+    assert len(done) == 2
+
+
+def test_truncated_final_line_is_survivable(tmp_path):
+    path = tmp_path / "nfcorpus__dense__depth-none.jsonl"
+    good = json.dumps({"query_id": "q1", "arm": "dense", "depth": None, "run_idx": 0})
+    path.write_text(good + "\n" + '{"query_id": "q2", "arm": "de')
+
+    done = completed_keys(tmp_path, "nfcorpus")
+    assert done == {("dense", None, "q1", 0)}
+
+    touched = repair_truncated(tmp_path, "nfcorpus")
+    assert touched == [path]
+    assert path.read_text().strip() == good
+
+
+def test_raw_record_json_carries_all_three_timers():
+    payload = json.loads(
+        RawRecord(
+            query_id="q", arm="dense", dataset="nfcorpus", depth=100, run_idx=0,
+            retrieved=[("d1", 1.0)], timers=QueryTimers(t_embed_ms=1.0, t_qdrant_ms=2.0),
+        ).to_json()
+    )
+    assert {"t_embed_ms", "t_qdrant_ms", "t_rerank_ms", "t_total_ms"} <= payload.keys()
+    assert payload["retrieved"] == [["d1", 1.0]]
+    assert payload["depth"] == 100
+
+
+# ------------------------------------------------------------------------ metrics
+
+
+def test_count_relevant_counts_graded_matches_only():
+    from src.metrics import count_relevant
+
+    qrels = {"docA": 2, "docB": 1, "docC": 0}  # grade 0 = judged not relevant
+    assert count_relevant(qrels, ["docA", "docB", "docC", "docZ"]) == 2
+    assert count_relevant(qrels, []) == 0
+    assert count_relevant({}, ["docA"]) == 0
+
+
+def test_recall_at_100_is_unsupported_below_depth_100():
+    assert _metric_supported("recall@100", 100) is True
+    assert _metric_supported("recall@100", 50) is False
+    assert _metric_supported("ndcg@10", 10) is True
+    assert _metric_supported("recall@100", None) is True
+
+
+def test_latency_percentiles_cover_every_component():
+    records = [
+        {"t_embed_ms": float(i), "t_qdrant_ms": float(i * 2), "t_rerank_ms": 0.0, "t_total_ms": float(i * 3)}
+        for i in range(1, 101)
+    ]
+    out = latency_percentiles(records)
+    for component in ("t_embed_ms", "t_qdrant_ms", "t_rerank_ms", "t_total_ms"):
+        for pct in (50, 95, 99):
+            assert f"{component}_p{pct}" in out
+    assert out["t_embed_ms_p50"] == pytest.approx(50.5)
+    assert out["n_latency_samples"] == 100
+
+
+def test_overlap_tau_and_rbo_on_identical_and_disjoint_lists():
+    a = [f"d{i}" for i in range(10)]
+    assert top_k_overlap(a, a) == 1.0
+    assert rbo(a, a, p=0.9) == pytest.approx(1.0, abs=1e-6)
+    assert kendall_tau_b(a, a) == pytest.approx(1.0)
+
+    b = [f"x{i}" for i in range(10)]
+    assert top_k_overlap(a, b) == 0.0
+    assert rbo(a, b, p=0.9) < 0.05
+
+
+def test_rbo_is_top_weighted():
+    a = ["d1", "d2", "d3", "d4"]
+    swap_top = ["d2", "d1", "d3", "d4"]
+    swap_bottom = ["d1", "d2", "d4", "d3"]
+    assert rbo(a, swap_top, p=0.9) < rbo(a, swap_bottom, p=0.9)
+
+
+def test_significance_p_values_are_actually_extracted():
+    """`report.comparisons` is a FrozensetDict, not a plain dict, so an
+    `isinstance(table, dict)` gate on it is always False and every p-value comes back
+    None with no error at all. Uses real ranx, no network/Qdrant needed.
+    """
+    from src.metrics import compare_arms
+
+    rng = __import__("numpy").random.default_rng(0)
+    qrels = {f"q{i}": {f"d{j}": int(j < 3) for j in range(10)} for i in range(30)}
+    run_a = {q: {f"d{j}": float(rng.random()) for j in range(10)} for q in qrels}
+    run_b = {q: {f"d{j}": float(rng.random()) for j in range(10)} for q in qrels}
+
+    result = compare_arms(qrels, {"a": run_a, "b": run_b})
+    row = result.pairs.iloc[0]
+    assert row["p_value"] is not None
+    assert 0.0 <= row["p_value"] <= 1.0
+    assert row["significant_raw"] is not None
+
+
+def test_kendall_tau_b_detects_a_reversal():
+    a = [f"d{i}" for i in range(10)]
+    assert kendall_tau_b(a, list(reversed(a))) == pytest.approx(-1.0)

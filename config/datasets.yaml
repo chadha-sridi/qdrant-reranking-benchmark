@@ -1,0 +1,94 @@
+# Five BEIR datasets, run smallest corpus first. Arm eligibility is
+# explicit per dataset; exclusions are reported in the manifest, never silently dropped.
+#
+# text_template builds the indexed document. BEIR convention is title + " " + text and
+# it materially moves the Gate 1 number, so it is config, not a hardcoded string.
+#
+# No dataset caps its query count: every judged query runs. Candidate
+# depths default to run.yaml's sweep, and a dataset overrides them only where its own
+# relevance profile demands it.
+#
+# hf_*_revision pins the exact HF Hub commit each dataset was loaded from, so a later
+# rerun cannot silently retrieve a different corpus/qrels from the same repo name.
+# Verified against the live HF API on 2026-09-03.
+
+defaults:
+  text_template: "{title} {text}"
+  qrels_split: test
+  colbert_on_disk_threshold: 100000   # above this, multivectors go on disk
+  measure_memory: true
+  depths: null                        # null = use execution.depths from run.yaml
+
+datasets:
+  nfcorpus:
+    hf_corpus: "BeIR/nfcorpus"
+    hf_qrels: "BeIR/nfcorpus-qrels"
+    hf_corpus_revision: "b5026a0e96e8a7ac4f95f482a596389289d46269"  # pinned 2026-09-03
+    hf_qrels_revision: "a451b3b26d3ae1358f259c1a3a4dd61fcea35a65"
+    corpus_size: 3633
+    n_queries: 323
+    expected_grades: [0, 1, 2]         # the only graded dataset here
+    representations: [dense, colbert, muvera]
+    enabled: true
+    # 38.2 relevant docs/query (median 16, p75 40, max 475) — an order of magnitude
+    # denser than anything else here, and the only dataset still gaining quality past
+    # depth 200, so it is the only one that sweeps to 500. It is also the cheapest place
+    # to do that: 323 queries and the smallest corpus.
+    # Caveat: depth 500 is ~14% of this corpus, a far higher rerank ratio than
+    # production would use.
+    depths: [10, 25, 50, 100, 200, 500]
+    notes: "development and smoke-test target; Gate 1 reference dataset"
+
+  scifact:
+    hf_corpus: "BeIR/scifact"
+    hf_qrels: "BeIR/scifact-qrels"
+    hf_corpus_revision: "b3b5335604bf5ee3c4447671af975ea25143d4f5"  # pinned 2026-09-03
+    hf_qrels_revision: "2938d17dc3b09882fdb8c12bbbe2e2dc0e75a029"
+    corpus_size: 5183
+    n_queries: 300
+    expected_grades: [0, 1]
+    representations: [dense, colbert, muvera]
+    enabled: true
+    # 1.1 relevant docs/query — essentially one correct answer per claim. Depth past
+    # ~25 buys no quality headroom, only latency signal.
+
+  scidocs:
+    hf_corpus: "BeIR/scidocs"
+    hf_qrels: "BeIR/scidocs-qrels"
+    hf_corpus_revision: "acebceec772628c6679d76d6cff30ad517d17f4e"  # pinned 2026-09-03
+    hf_qrels_revision: "735ea1048e37b1ebce14c6dc3d33a5edaf66d3dc"
+    corpus_size: 25657
+    n_queries: 1000
+    expected_grades: [0, 1]
+    representations: [dense, colbert, muvera]
+    enabled: true
+    # Exactly 5 relevant docs per query, always. Depths past ~50 measure latency/cost
+    # against a quality plateau — which is the plateau the sweep exists to find.
+
+  fiqa:
+    hf_corpus: "BeIR/fiqa"
+    hf_qrels: "BeIR/fiqa-qrels"
+    hf_corpus_revision: "979c07a7cb5ccc6ca009792241fa1250b98055dd"  # pinned 2026-09-03
+    hf_qrels_revision: "252958f2d646e22cab6d0c72dd3f0d5de6d0655a"
+    corpus_size: 57638
+    n_queries: 648
+    expected_grades: [0, 1]
+    representations: [dense, colbert, muvera]
+    enabled: true
+    # 2.6 relevant docs/query (max 15); 100% of queries have all relevant docs within
+    # depth 25.
+
+  quora:
+    hf_corpus: "BeIR/quora"
+    hf_qrels: "BeIR/quora-qrels"
+    hf_corpus_revision: "54934c6ffc800b0928b057f047315b5d1a1d71d8"  # pinned 2026-09-03
+    hf_qrels_revision: "7906857d63e4b4d41fd16c954c929c3ff3c580d9"
+    corpus_size: 522931
+    n_queries: 10000
+    expected_grades: [0, 1]
+    representations: [dense, colbert, muvera]
+    colbert_on_disk_threshold: 0       # force on-disk multivectors at this scale
+    enabled: true
+    # 1.6 relevant docs/query (median 1, p75 1, max 75); saturates by depth 50.
+    # Uncapped like every other dataset, so all 10,000 judged queries run. That is
+    # deliberate and expensive: it is ~90% of the benchmark's cross_encoder cost.

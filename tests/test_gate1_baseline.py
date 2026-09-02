@@ -1,0 +1,88 @@
+"""Gate 1 — the baseline reproduces the published NDCG.
+
+`dense` on NFCorpus must match the published BEIR NDCG@10 for the chosen model within
+~0.01. If it does not, something is wrong in qrels parsing, ID mapping, or the metric
+call, and every downstream number is invalid. Nothing else matters until this passes.
+
+Run against the FULL 323-query NFCorpus test set, not the subsample: the published figure
+is a full-set number and a 250-query subsample is not comparable to it.
+This is the only place a metric is computed outside the validation split.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.arms import REGISTRY, ArmContext
+from src.indexing import build_client
+from src.metrics import build_run_dict, evaluate_quality
+
+pytestmark = [pytest.mark.gate, pytest.mark.slow]
+
+
+def test_gate1_reference_is_verified(cfg):
+    """A reference number nobody checked makes the gate either vacuous or falsely failing."""
+    ref = cfg.models.dense.reference
+    if not ref.verified:
+        pytest.fail(
+            f"config/models.yaml pins dense.reference.{ref.metric}={ref.value} on "
+            f"{ref.dataset} with verified: false. Confirm it against {ref.source} and set "
+            "verified: true before trusting Gate 1 or publishing anything downstream."
+        )
+
+
+def test_gate1_dense_matches_published_ndcg(cfg, nfcorpus, encoders, nfcorpus_collection):
+    ref = cfg.models.dense.reference
+    assert ref.dataset == "nfcorpus", "Gate 1 is defined against nfcorpus"
+
+    client = build_client(cfg)
+    ctx = ArmContext(
+        client=client,
+        cfg=cfg,
+        encoders=encoders,
+        id_map=nfcorpus.id_map,
+        collection=nfcorpus_collection,
+        dataset="nfcorpus",
+    )
+    arm = REGISTRY["dense"]
+
+    # Full query set, judged queries only.
+    qrels = _all_qrels(nfcorpus)
+    judged = {qid: text for qid, text in nfcorpus.all_queries.items() if qid in qrels}
+    assert len(judged) > 300, f"expected ~323 judged nfcorpus queries, got {len(judged)}"
+
+    records = []
+    for query_id, text in judged.items():
+        output = arm(ctx, text, None)
+        records.append({"query_id": query_id, "retrieved": output.retrieved, "run_idx": 0})
+    client.close()
+
+    run = build_run_dict(records)
+    scores = evaluate_quality(qrels, run, metrics=(ref.metric,))
+    observed = scores[ref.metric]
+
+    assert observed is not None, "metric did not evaluate"
+    delta = abs(observed - ref.value)
+    assert delta <= ref.tolerance, (
+        f"Gate 1 FAILED: {ref.metric}={observed:.4f} on {len(run)} nfcorpus queries, "
+        f"published {ref.value:.4f} (delta {delta:.4f} > tolerance {ref.tolerance}). "
+        "Suspect qrels parsing, ID mapping, document text construction, or the metric "
+        "call — not the model. Every downstream number is invalid until this passes."
+    )
+
+
+def _all_qrels(bundle) -> dict[str, dict[str, int]]:
+    """Reload the unsubsampled qrels for the full-set comparison."""
+    from datasets import load_dataset as hf_load
+
+    spec = bundle.spec
+    out: dict[str, dict[str, int]] = {}
+    for row in hf_load(spec.hf_qrels, split=spec.qrels_split):
+        out.setdefault(str(row["query-id"]), {})[str(row["corpus-id"])] = int(row["score"])
+    # Keep only judged docs that exist in the indexed corpus.
+    known = set(bundle.id_map.to_point)
+    return {
+        qid: {did: rel for did, rel in judgements.items() if did in known}
+        for qid, judgements in out.items()
+        if any(did in known for did in judgements)
+    }

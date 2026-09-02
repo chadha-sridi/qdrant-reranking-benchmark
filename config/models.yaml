@@ -1,0 +1,63 @@
+# Model pinning. FastEmbed does not expose HF revision SHAs, so the real guarantee is
+# the fastembed version in the lockfile plus the SHA-256 of every resolved model file,
+# recorded at run time as manifest.model_file_digests.
+
+dense:
+  name: "BAAI/bge-small-en-v1.5"
+  dim: 384
+  distance: cosine
+  max_length: 512
+  # Gate 1 checks this reference value. MUST be confirmed against the MTEB leaderboard
+  # before publishing; while verified is false the gate emits a warning.
+  reference:
+    dataset: nfcorpus
+    metric: "ndcg@10"
+    value: 0.3164
+    tolerance: 0.01
+    source: "https://huggingface.co/spaces/mteb/leaderboard"
+    query_set: "all 323 nfcorpus test queries"
+    verified: false
+
+# TurboQuant for the quantized_rescore arm. Qdrant-native, asymmetric:
+# stored vectors are compressed, the query stays full precision. `bits` is the knob the
+# user is most likely to sweep; 4 is Qdrant's own default (8x compression).
+quantization:
+  bits: "4"          # one of: "4" (8x), "2" (16x), "1.5" (24x), "1" (32x)
+  memory: pinned     # pinned | cached | cold — pinned keeps quantized vectors in RAM
+  rescore: true      # rescore candidates against the original full-precision vectors
+
+colbert:
+  name: "colbert-ir/colbertv2.0"
+  dim: 128
+  distance: cosine
+  doc_max_tokens: 300
+  query_max_tokens: 32
+  # Multivectors are for rescoring only. m=0 is required, not optional.
+  hnsw_m: 0
+  comparator: max_sim
+
+muvera:
+  # fastembed.postprocess.Muvera — the reference implementation the MUVERA/Qdrant
+  # ecosystem uses. k_sim/n_reps/d_proj are fastembed's own defaults (k_sim=5, r_reps=20,
+  # dim_proj=16), matching the Qdrant MUVERA article's NFCorpus/ColBERTv2 benchmark
+  # config. Run `benchmark calibrate-muvera` (real ColBERT embeddings) before
+  # publishing any muvera number, and record the outcome here.
+  source_tokens: colbert
+  k_sim: 5          # -> 2**5 = 32 clusters
+  n_reps: 20
+  d_proj: 16
+  # dim = n_reps * 2**k_sim * d_proj = 20 * 32 * 16 = 10240
+  distance: cosine  # matches the Qdrant MUVERA tutorial's collection config
+  calibrated: true
+  calibration_note: >-
+    Calibrated 2026-09-03 on the full NFCorpus corpus (3,633 docs, 80 queries) with
+    fastembed's official Muvera at its own defaults. FDE beats bag-of-tokens at every
+    depth (recall@10: 0.352 vs 0.161; recall@500: 0.852 vs 0.709). Passes the >=80%
+    recall@deepest-depth threshold. See results/agg/nfcorpus__muvera_calibration.json.
+    At 10240 float32 dims MUVERA's storage advantage over ColBERT multivectors is
+    still modest — report that from the memory table rather than hiding it.
+
+cross_encoder:
+  name: "Xenova/ms-marco-MiniLM-L-6-v2"
+  size_gb: 0.08
+  license: "Apache-2.0"
