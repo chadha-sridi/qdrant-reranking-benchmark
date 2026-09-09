@@ -2,19 +2,17 @@
 
 A run builds its collection on a Qdrant started from wiped storage, so latency is
 measured on an index built from nothing rather than on whatever a previous run left
-behind. The destructive helpers here therefore refuse to touch anything outside the
-project's own storage directory.
+behind. Storage is a Docker named volume; the destructive helper here refuses to touch
+any volume but the one named in config.
 """
 
 from __future__ import annotations
 
 import functools
-import shutil
 import subprocess
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from .config import Config
 
@@ -27,7 +25,7 @@ class QdrantController:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.container = cfg.run.qdrant.container_name
-        self.storage = (cfg.root / cfg.run.qdrant.storage_path).resolve()
+        self.volume = cfg.run.qdrant.storage_volume
         self.root = cfg.root.resolve()
         self.compose_file = cfg.root / "docker-compose.yml"
 
@@ -70,7 +68,6 @@ class QdrantController:
         manifest to the host's own architecture when none is forced.
         """
         cfg = self.cfg.run.qdrant
-        self.storage.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["docker", "rm", "-f", self.container], capture_output=True, text=True, check=False
         )
@@ -80,7 +77,8 @@ class QdrantController:
                 "--name", self.container,
                 "-p", "6333:6333",
                 "-p", f"{cfg.grpc_port}:6334",
-                "-v", f"{self.storage}:/qdrant/storage",
+                # Same named volume as compose, so both launchers see one storage.
+                "-v", f"{self.volume}:/qdrant/storage",
                 "-e", "QDRANT__LOG_LEVEL=WARN",
                 "-e", "QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS=4",
                 "-e", "QDRANT__TELEMETRY_DISABLED=true",
@@ -113,17 +111,26 @@ class QdrantController:
         self._compose("down", check=False)
 
     def wipe_storage(self) -> None:
-        """Delete the storage directory. Guarded: must live under the project root."""
-        target = self.storage
-        if not str(target).startswith(str(self.root) + "/"):
+        """Remove the storage volume, so the next `up` starts from an empty one.
+
+        Guarded to one exact volume name from config: this is a destructive Docker
+        operation, and a name that looks like a path or a prefix could take out
+        something that is not ours. The container must be down first — Docker refuses
+        to remove a volume still in use, which is the backstop if it is not.
+        """
+        volume = self.volume
+        if not volume or "/" in volume or volume != self.cfg.run.qdrant.storage_volume:
             raise QdrantControlError(
-                f"refusing to wipe {target}: outside the project root {self.root}"
+                f"refusing to remove volume {volume!r}: must be exactly the configured "
+                "run.qdrant.storage_volume and not a path"
             )
-        if target.name != Path(self.cfg.run.qdrant.storage_path).name:
-            raise QdrantControlError(f"refusing to wipe {target}: unexpected directory name")
-        if target.exists():
-            shutil.rmtree(target)
-        target.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["docker", "volume", "rm", volume], capture_output=True, text=True, check=False
+        )
+        stderr = result.stderr.strip()
+        # A volume that does not exist yet is the expected state on a first run.
+        if result.returncode != 0 and "no such volume" not in stderr.lower():
+            raise QdrantControlError(f"could not remove volume {volume}: {stderr}")
 
     def restart_clean(self) -> None:
         """Full reset: stop, wipe, start. What a from-scratch collection build starts from."""

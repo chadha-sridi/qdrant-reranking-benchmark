@@ -875,12 +875,16 @@ def test_latency_percentiles_cover_every_component():
         {"t_embed_ms": float(i), "t_qdrant_ms": float(i * 2), "t_rerank_ms": 0.0, "t_total_ms": float(i * 3)}
         for i in range(1, 101)
     ]
+    from src.metrics import PERCENTILES
+
     out = latency_percentiles(records)
     for component in ("t_embed_ms", "t_qdrant_ms", "t_rerank_ms", "t_total_ms"):
-        for pct in (50, 95, 99):
+        for pct in PERCENTILES:
             assert f"{component}_p{pct}" in out
     assert out["t_embed_ms_p50"] == pytest.approx(50.5)
     assert out["n_latency_samples"] == 100
+    # p99 is deliberately not reported at one pass per query.
+    assert "t_total_ms_p99" not in out
 
 
 def test_overlap_tau_and_rbo_on_identical_and_disjoint_lists():

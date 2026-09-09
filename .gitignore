@@ -4,11 +4,8 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
-# Qdrant storage is wiped and rebuilt by the memory phase; never commit it.
-qdrant_storage/
-
-# Embeddings are platform-specific and must never be carried across architectures
-# (spec.md section 1). Regenerate on the target machine.
+# Embeddings are platform-specific and must never be carried across architectures.
+# Regenerate on the target machine.
 cache/
 
 # Raw measurements and aggregates are run outputs. Commit them deliberately, per

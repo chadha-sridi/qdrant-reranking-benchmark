@@ -89,7 +89,12 @@ class QdrantConfig(_Frozen):
     timeout_s: int
     image: str
     container_name: str
-    storage_path: str
+    # Docker named volume, not a host bind mount. A bind mount from macOS reaches the
+    # container through the VM's virtiofs passthrough, which makes Qdrant refuse
+    # multi-mmap ("you may see reduced performance") and warn about corruption risk —
+    # both of which land directly on the latency and memory numbers this measures. A
+    # named volume lives on the VM's own filesystem and avoids the passthrough.
+    storage_volume: str
     hnsw: HnswConfig
     upsert_batch_size: int
     # Segment size (KB) above which Qdrant builds the HNSW index. Indexing is disabled
@@ -148,6 +153,9 @@ class DenseReference(_Frozen):
     source: str
     query_set: str
     verified: bool
+    # What this pipeline actually measured against `value`, recorded so the gap between
+    # published and reproduced is visible rather than folded into `tolerance`.
+    observed: float | None = None
 
 
 class DenseModel(_Frozen):

@@ -1,9 +1,8 @@
-# Image tag is pinned; the manifest records it and a result is only reproducible
-# against the exact image. No `platform` is set deliberately: Qdrant ships a
-# multi-arch manifest, and this file runs NATIVE to whatever host executes it (no
-# emulation), so latency is real for that machine (DECISIONS.md J1). spec.md section 1
-# asks for a fixed linux/amd64 target instead — use docker-compose.amd64.yml as an
-# override if you need to reproduce numbers on that architecture specifically.
+# Image tag is pinned; the manifest records it, and a result is only reproducible
+# against the exact image. No `platform` is set deliberately: Qdrant ships a multi-arch
+# manifest, so this runs NATIVE to whatever host executes it (no emulation) and latency
+# is real for that machine. Use docker-compose.amd64.yml as an override to force
+# linux/amd64 instead.
 services:
   qdrant:
     image: qdrant/qdrant:v1.19.0
@@ -12,12 +11,22 @@ services:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - ./qdrant_storage:/qdrant/storage
+      # A named volume, NOT a host bind mount. A bind mount from macOS reaches the
+      # container through the VM's virtiofs passthrough, where Qdrant reports
+      # "Filesystem check failed ... may cause data corruption" and falls back off
+      # multi-mmap with "you may see reduced performance". Storage here is mmap-heavy,
+      # so that fallback lands straight on the latency and memory figures this
+      # benchmark exists to measure. A named volume lives on the VM's own filesystem.
+      - qdrant_storage:/qdrant/storage
     environment:
-      # Deterministic-ish index builds and a quiet log. Segment count is pinned so
-      # HNSW build variance (Gate 4) is measured against a fixed segmentation.
       QDRANT__LOG_LEVEL: WARN
       QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS: 4
       QDRANT__TELEMETRY_DISABLED: "true"
-    # Memory measurement (spec.md section 5) reads container RSS, so no limit is set
-    # here; a cgroup cap would clip the number we are trying to observe.
+    # No memory limit: the memory phase reads Qdrant's own per-collection accounting,
+    # and a cgroup cap would clip the figures being observed.
+
+volumes:
+  qdrant_storage:
+    # Pinned explicitly so the volume name does not depend on the directory name or
+    # COMPOSE_PROJECT_NAME. `run.qdrant.storage_volume` must match this.
+    name: reranking_benchmark_qdrant_storage

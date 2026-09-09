@@ -4,8 +4,8 @@ Aggregation happens only here, at analysis time, from the raw per-query records.
 
 Two rules that shape everything below:
   * Quality comes from run_idx 0 only. Retrieval is deterministic given a fixed index,
-    so all three timing runs return identical lists; counting them three times would
-    inflate a significance test's sample size threefold.
+    so repeated passes return identical lists; counting each one would inflate a
+    significance test's sample size.
   * recall@100 is null wherever depth < 100, because the arm could not return 100
     documents.
 """
@@ -30,7 +30,9 @@ LATENCY_COMPONENTS = (
     "t_rerank_ms",
     "t_total_ms",
 )
-PERCENTILES = (50, 95, 99)
+# p99 is not reported: with one pass there is one latency sample per evaluated query,
+# so a p99 would rest on a handful of points and read as false precision.
+PERCENTILES = (50, 95)
 
 
 class MetricsError(RuntimeError):
@@ -214,7 +216,7 @@ def _extract_p(report, arm_a: str, arm_b: str, metric: str) -> float | None:
 
 
 def latency_percentiles(records: Sequence[dict]) -> dict[str, float | None]:
-    """p50/p95/p99 per component and for the total, over every timing run."""
+    """p50/p95 per component and for the total, over every timing run."""
     out: dict[str, float | None] = {}
     for component in LATENCY_COMPONENTS:
         values = np.asarray(

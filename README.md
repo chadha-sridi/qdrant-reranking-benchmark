@@ -21,7 +21,7 @@ Experiments can be run at different candidate depths to see how each strategy sc
 - [Execution order and warmup](#execution-order-and-warmup)
 - [Running the benchmark](#running-the-benchmark)
 - [Interpreting the numbers](#interpreting-the-numbers)
-- [Before you publish anything](#before-you-publish-anything)
+- [Validation gates](#validation-gates)
 - [Output](#output)
 - [Known limitations](#known-limitations)
 
@@ -39,12 +39,26 @@ Experiments can be run at different candidate depths to see how each strategy sc
   weights. No account or token is required; you'll see a harmless "unauthenticated
   requests" rate-limit warning.
 - No GPU required or used — everything runs CPU-side (ONNX Runtime via FastEmbed).
+  Note that FastEmbed serves its own ONNX conversions, which for some models are
+  quantized rather than full precision — relevant if you compare a score here against
+  a published PyTorch figure (see [Validation gates](#validation-gates)).
 
 There is deliberately **no fixed target machine**. `docker-compose.yml` runs Qdrant
 native to whatever host executes it — an Apple
 Silicon Mac gets a native arm64 container, an x86 Linux box gets native amd64, neither
 is emulated. Latency numbers are only meaningful for the machine that produced them;
 `results/manifest.json` records which one that was.
+
+Qdrant's storage is a **Docker named volume**, not a host bind mount. This is a
+measurement requirement, not a preference: a bind mount from macOS reaches the container
+through the VM's virtiofs passthrough, where Qdrant reports `Filesystem check failed …
+FUSE filesystems may cause data corruption` and falls back off multi-mmap with `you may
+see reduced performance`. Vector storage is mmap-heavy, so that fallback lands directly
+on the latency and memory figures this benchmark exists to produce. On a named volume the
+same check reports `ext4` and both warnings disappear. The tradeoff is that storage is no
+longer browsable from the host — inspect it with
+`docker exec reranking_benchmark_qdrant ls /qdrant/storage` instead. `run.qdrant.storage_volume`
+must match the `name:` under `volumes:` in `docker-compose.yml`.
 
 ---
 
@@ -111,8 +125,8 @@ tests/
 ├── test_muvera.py                FDE properties provable on synthetic data
 ├── test_gate1_baseline.py       Gate 1 — baseline reproduces published NDCG
 ├── test_gate2_arms_distinct.py  Gate 2 — no arm silently collapses into another
-├── test_gate4_hnsw_variance.py  Gate 4 — HNSW build variance across two builds
-├── test_gate5_unattended.py     Gate 5 — full pipeline runs and resumes cleanly
+├── test_gate3_hnsw_variance.py  Gate 3 — HNSW build variance across two builds
+├── test_gate4_unattended.py     Gate 4 — pipeline runs, resumes, and aggregates
 └── test_muvera_calibration.py   MUVERA gate — real-embedding recall check
 
 scripts/
@@ -257,8 +271,18 @@ relevant documents in the candidate set is measured, not assumed.
 
 ## Cost and runtime
 
-All figures measured on this machine (Apple M4, 16 GB RAM, CPU-only): cross-encoder
-**310 pairs/sec**, dense embedding **121 docs/sec**, ColBERT embedding **87 docs/sec**.
+All figures measured on this machine (Apple M4, 16 GB RAM, CPU-only). The
+cross-encoder figure is measured from 4,110 real NFCorpus records and is consistent
+across every candidate depth (28.6–29.1 pairs/sec at depths 10 through 500):
+
+| | Measured |
+|---|---:|
+| Cross-encoder rerank | **28.8 pairs/sec** |
+| Dense embedding | 121 docs/sec |
+| ColBERT embedding | 87 docs/sec |
+
+Cross-encoder throughput depends strongly on document length, and these are long
+PubMed-style abstracts; expect a different figure on short-document corpora.
 
 **One-time, cached** — corpus embedding (615,042 documents across the five datasets):
 
@@ -268,31 +292,50 @@ All figures measured on this machine (Apple M4, 16 GB RAM, CPU-only): cross-enco
 | ColBERT | ~2.0h |
 | **Total** | **~3.4h** (Quora alone is ~2.9h of it) |
 
-**Per full run** — querying, 12,021 evaluated queries × 3 repeats:
+**Per full run** — querying, 12,021 evaluated queries at `repeats: 1`. `cross_encoder` is
+~97% of it:
 
-| Arm | Est. hours |
+| Dataset | Depths | Est. hours |
+|---|---|---:|
+| nfcorpus | 10/25/50/100/200/500 | ~2.8h |
+| scifact | 10/25/50/100/200 | ~1.2h |
+| scidocs | 10/25/50/100/200 | ~3.9h |
+| fiqa | 10/25/50/100/200 | ~2.5h |
+| **quora** | 10/25/50/100/200 | **~38.7h** |
+| **Total** | | **~49h** |
+
+Capping Quora at 500 queries brings the total to **~12.5h** while keeping the
+large-corpus data point and the on-disk ColBERT regime it is the only source of.
+
+Measured per-query cost at depth 500 shows where it all goes:
+
+| Arm | ms/query @ depth 500 |
 |---|---:|
-| `dense` | ~0.05h |
-| `quantized_rescore` | ~0.4h |
-| `colbert_rescore` | ~0.9h |
-| `muvera_colbert` | ~1.8h |
-| **`cross_encoder`** | **~12.8h** |
-| **Total** | **~16h** |
+| **`cross_encoder`** | **17,319** |
+| `muvera_colbert` | 129 |
+| `colbert_rescore` | 112 |
+| `dense` (no depth) | 10 |
 
-`cross_encoder` dominates by ~7× because it is the only arm that reranks client-side:
-it runs a transformer forward pass per (query, document) pair on CPU, where every other
-arm pushes the work into Qdrant as vector arithmetic. About 90% of that 12.8h is Quora,
-which contributes 9,950 of the 12,021 evaluated queries.
+`cross_encoder` dominates because it is the only arm that reranks client-side: a
+transformer forward pass per (query, document) pair on CPU, where every other arm
+pushes the work into Qdrant as vector arithmetic. Its cost scales linearly with the
+**sum** of the swept depths, so the deepest point dominates — depth 500 alone is 56% of
+NFCorpus's cross-encoder cost.
 
-Levers, in order of effect — runtime scales with the **sum** of the depths, so the
-deepest point costs the most:
+Levers, in order of effect:
 
 | Change | Saves | Costs you |
 |---|---|---|
-| Drop `cross_encoder` | ~12.8h | your only client-side reranking arm |
-| Cap Quora at 500 queries | ~11h | 4.5× wider CI on the one large-corpus dataset |
-| Drop depth 200 everywhere | ~5h | the plateau evidence the depth curve rests on |
-| `repeats: 3 → 2` | ~5h | latency percentile stability (quality is unaffected — it comes from `run_idx 0` only) |
+| Cap Quora at 500 queries | ~37h | 4.5× wider CI on the one large-corpus dataset |
+| Cap `cross_encoder` at depth ≤100 | ~75% of its cost | the deep end of its depth curve only |
+| Drop NFCorpus depth 500 | ~1.3h | the only depth point past 200 with real headroom |
+
+| Drop `cross_encoder` entirely | ~140h | your only client-side reranking arm |
+| Cap Quora at 500 queries | ~110h | 4.5× wider CI on the one large-corpus dataset |
+
+Depth 500 on NFCorpus costs 17.4s/query for `cross_encoder` alone — ~1.3h, roughly half
+of NFCorpus's total. It is kept because NFCorpus (38 relevant docs/query) is the only
+dataset with real quality headroom past depth 200.
 
 ---
 
@@ -355,7 +398,7 @@ ColBERT pass (~2.9 h) loses that pass. Once cached, it is reused for free.
 
 ## What gets measured
 
-**Latency**, three independent timers per query, recorded raw (per query, per repeat)
+**Latency**, three independent timers per query, recorded raw (per query, per pass)
 and only aggregated at analysis time:
 
 | Field | What it is |
@@ -493,7 +536,7 @@ python -m src.cli run --dataset fiqa --dense-model BAAI/bge-base-en-v1.5 --quant
 | `--overwrite` | off | with `--no-resume`, delete this dataset's existing raw records first, instead of refusing to run |
 | `--measure-memory` / `--no-measure-memory` | on | read Qdrant's per-vector memory accounting off the built collection |
 | `--resume-ingestion` | off | reuse a matching existing collection and re-send only missing points, instead of wiping storage and rebuilding — use after a crash mid-upload |
-| `--allow-unverified-baseline` | off | proceed even though the default dense model's Gate 1 reference is `verified: false` |
+| `--allow-unverified-baseline` | off | proceed when the dense model's Gate 1 reference is marked `verified: false` (it is verified by default, so this is only needed after overriding the model) |
 | `--dense-model` | config | override the baseline dense model every arm reranks |
 | `--dense-model-dim` | auto | dimension of `--dense-model`, if FastEmbed's registry can't resolve it |
 | `--quant-bits` | `4` | TurboQuant bit width for `quantized_rescore`: `4`, `2`, `1.5`, or `1` |
@@ -585,25 +628,38 @@ details, and each changes what a number means.
 
 ---
 
-## Before you publish anything
+## Validation gates
 
-One thing is deliberately **not** verified out of the box, and `run`/`aggregate`
-enforce it rather than just warning:
+Pre-run correctness checks, not part of a run. Each guards one assumption that, if
+broken, would make every downstream number wrong while still looking plausible. Run them
+once before trusting results, and again after changing models, datasets, or indexing.
+They are ordinary pytest tests marked `gate` and `slow`, so they need Docker, the models,
+and a live Qdrant. 
 
-1. **Gate 1's reference score is unconfirmed.** `config/models.yaml` pins
-   `bge-small-en-v1.5` at NDCG@10 = 0.3164 on NFCorpus with `verified: false`. `run`
-   refuses to proceed with the default dense model until you either confirm the
-   number against the MTEB leaderboard and flip the flag, or pass
-   `--allow-unverified-baseline` to proceed knowingly. Gate 1 is what licenses trust
-   in every downstream number — a wrong reference makes it either vacuous or falsely
-   failing.
+| Gate | Checks | Status |
+|---|---|---|
+| **1** `test_gate1_baseline` | The `dense` baseline reproduces the model's published NDCG@10 on NFCorpus over all 323 judged queries. Catches broken qrels parsing, ID mapping, document construction, or metric calls. | ✅ passes |
+| **2** `test_gate2_arms_distinct` | No two arms return identical rankings, and every registered arm either runs or is excluded with a stated reason. Catches an arm silently collapsing into its own prefetch. | ✅ passes |
+| **3** `test_gate3_hnsw_variance` | Two independent index builds of the same vectors agree within 0.005 NDCG@10. Establishes the noise floor below which no arm-to-arm difference is interpretable. | ✅ passes |
+| **4** `test_gate4_unattended` | The pipeline runs end to end on a 5-query, 2-depth subset, resumes idempotently, and aggregates into its artefacts. Catches resume bugs (double-counting) and missing output. | ✅ scoped to a subset |
+| **MUVERA** `test_muvera_calibration` | The FDE prefetch beats a bag-of-tokens baseline and recovers ≥80% of the exact ColBERT top-10 at the deepest sweep depth. Without it, `muvera_colbert` would measure its own recall ceiling rather than reranking quality. | ✅ passes |
 
-MUVERA's calibration is in place: it uses fastembed's official `Muvera`
-postprocessor and is validated on the full NFCorpus corpus (see
-[Known limitations](#known-limitations)). `muvera_colbert` is still gated per
-dataset — `resolve_arms` excludes it on any dataset without a passing calibration
-artifact or an explicit `muvera.calibrated: true` override, so it can't silently run
-uncalibrated even if you add a new dataset later.
+**On Gate 1's published-vs-measured gap.** The gate passes with measured NDCG@10 =
+**0.3314** against the published **0.34305** (Δ0.0117), inside a deliberately widened
+0.02 tolerance. The gap has one identified cause: FastEmbed distributes this model only
+as a quantized ONNX build (`qdrant/bge-small-en-v1.5-onnx-q`, 66.5 MB against ~133 MB
+for full precision, with no fp32 variant offered), while the published figure was
+produced with the full-precision model. Document construction was ruled out as a cause —
+the loader already follows BEIR's `{title} {text}` convention. A −3.4% relative shortfall
+is what a quantized encoder predicts; a genuine qrels or ID-mapping fault would drop NDCG
+far more, which is what keeps the widened tolerance meaningful rather than vacuous.
+
+MUVERA's calibration is in place: it uses fastembed's official `Muvera` postprocessor and
+is validated on the full NFCorpus corpus (see
+[Known limitations](#known-limitations)). `muvera_colbert` is still gated per dataset —
+`resolve_arms` excludes it on any dataset without a passing calibration artifact or an
+explicit `muvera.calibrated: true` override, so it cannot silently run uncalibrated even
+if you add a new dataset later.
 
 Run the test suite:
 

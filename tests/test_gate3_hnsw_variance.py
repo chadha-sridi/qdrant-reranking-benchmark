@@ -1,4 +1,4 @@
-"""Gate 4 — HNSW build variance is negligible.
+"""Gate 3 — HNSW build variance is negligible.
 
 Index `dense` twice into two collections, run the same queries, compare NDCG@10. Expect
 a gap under ~0.005. This quantifies HNSW graph-construction nondeterminism, which is the
@@ -47,11 +47,11 @@ def _score_dense(cfg, bundle, encoders, collection: str) -> float:
     return score
 
 
-def test_gate4_hnsw_build_variance(cfg, nfcorpus, encoders, controller):
+def test_gate3_hnsw_build_variance(cfg, nfcorpus, encoders, controller):
     """Two independent builds of the same vectors must agree to within ~0.005 NDCG@10."""
     client = build_client(cfg)
     vectors = embed_corpus(cfg, nfcorpus, encoders, ["dense"])
-    names = ["nfcorpus__gate4_a", "nfcorpus__gate4_b"]
+    names = ["nfcorpus__gate3_a", "nfcorpus__gate3_b"]
     for name in names:
         create_collection(client, cfg, nfcorpus.spec, name, ["dense"])
         upsert_documents(client, cfg, nfcorpus, name, ["dense"], vectors)
@@ -67,7 +67,7 @@ def test_gate4_hnsw_build_variance(cfg, nfcorpus, encoders, controller):
 
     print(f"HNSW build variance: {scores[0]:.5f} vs {scores[1]:.5f} -> gap {gap:.5f}")
     assert gap < THRESHOLD, (
-        f"Gate 4 FAILED: two independent builds of the same dense vectors differ by "
+        f"Gate 3 FAILED: two independent builds of the same dense vectors differ by "
         f"{gap:.5f} NDCG@10 (threshold {THRESHOLD}). Arm-to-arm differences smaller than "
         "this are not interpretable."
     )

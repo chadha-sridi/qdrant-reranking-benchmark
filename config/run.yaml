@@ -17,7 +17,11 @@ queries:
   warmup_count: 50
 
 execution:
-  repeats: 3                  # timing runs per query; quality from run_idx 0 only
+  # One pass. Quality is deterministic given a fixed index (and is read from run_idx 0
+  # regardless), and memory is read once from Qdrant after indexing — so repeats only
+  # ever served latency percentiles. One pass already yields one sample per evaluated
+  # query per (arm, depth), which is ample for p50/p95; p99 is not reported.
+  repeats: 1
   final_limit: 10             # k for ndcg@10 / recall@10 / mrr@10
   max_stored_results: 100     # capped to min(this, depth)
   flush_every: 25             # fsync cadence on raw JSONL
@@ -41,7 +45,11 @@ qdrant:
   timeout_s: 120
   image: "qdrant/qdrant:v1.19.0"
   container_name: "reranking_benchmark_qdrant"
-  storage_path: "./qdrant_storage"
+  # Docker named volume (must match the `name:` in docker-compose.yml), not a host
+  # directory. A bind mount from macOS goes through the VM's virtiofs passthrough, which
+  # disables Qdrant's multi-mmap and degrades exactly the latency and memory this
+  # benchmark measures.
+  storage_volume: "reranking_benchmark_qdrant_storage"
   # Identical across all dense collections so graph construction variance is
   # minimised.
   hnsw:

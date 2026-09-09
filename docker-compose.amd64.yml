@@ -1,11 +1,10 @@
-# Opt-in override to reproduce spec.md section 1's originally-intended linux/amd64
-# target on a non-x86 host. Runs under emulation there and is expected to be slow —
-# a single upsert batch has been observed to exceed the default 120s gRPC timeout on
-# an ARM Mac (DECISIONS.md J1). Not the default; apply explicitly:
+# Opt-in override to force a linux/amd64 target on a non-x86 host. Runs under emulation
+# there and is expected to be slow — a single upsert batch has been observed to exceed
+# the default 120s gRPC timeout on an ARM Mac. Not the default; apply explicitly:
 #
 #   docker compose -f docker-compose.yml -f docker-compose.amd64.yml up -d
 #
-# Bump run.qdrant.timeout_s in config/run.yaml before indexing anything non-trivial
+# Raise run.qdrant.timeout_s in config/run.yaml before indexing anything non-trivial
 # under this override.
 services:
   qdrant:
