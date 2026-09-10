@@ -93,7 +93,7 @@ instead, since that works without installing anything.
 config/
 ├── run.yaml           seeds, query sampling, execution (repeats/depths), Qdrant
 │                       connection, arm enablement
-├── models.yaml         model names/dims, TurboQuant defaults, ColBERT/MUVERA params,
+├── models.yaml         model names/dims, ColBERT/MUVERA params,
 │                       cross-encoder(s), the Gate 1 reference NDCG
 └── datasets.yaml       per-dataset HF source, size, representations, depth overrides
 
@@ -106,8 +106,8 @@ src/
 ├── embedding.py         model wrappers (FastEmbed) + platform-keyed embedding cache
 ├── muvera.py            thin wrapper around fastembed's official Muvera FDE
 │                       postprocessor, plus the real-embedding calibration routine
-├── indexing.py          collection creation (incl. TurboQuant config), resumable
-│                       upsert, index build, and ingestion verification
+├── indexing.py          collection creation, resumable upsert, index build, and
+│                       ingestion verification
 ├── memory.py            per-named-vector memory, read from Qdrant's own accounting
 ├── qdrant_control.py    container lifecycle (start/stop/wipe)
 ├── arms.py              the arm registry — one `@register`-decorated function per
@@ -147,7 +147,7 @@ what lives where, so you know which file to edit:
 | File | Controls |
 |---|---|
 | `run.yaml` | seeds, how many queries are sampled and how they're split, repeats, candidate depths, Qdrant connection and HNSW/indexing thresholds, which arms run by default |
-| `models.yaml` | model names and dimensions, TurboQuant defaults, ColBERT/MUVERA parameters, the pinned Gate 1 reference score |
+| `models.yaml` | model names and dimensions, ColBERT/MUVERA parameters, the pinned Gate 1 reference score |
 | `datasets.yaml` | which BEIR datasets are enabled, their HF source, corpus size, which representations to index, per-dataset depth overrides |
 
 Most of these values are also overridable per invocation via CLI flags (below) without
@@ -205,31 +205,20 @@ combine retrievers rather than rescore a candidate set with a richer relevance s
 
 | # | Arm | Sweeps depth | Default | Mechanism |
 |---|---|:---:|:---:|---|
-| 1 | `dense` | | ✓ | The baseline itself — full precision, explicitly bypasses quantization |
-| 2 | `quantized_rescore` | ✓ | ✓ | TurboQuant-compressed search → rescore against full-precision vectors |
-| 3 | `colbert_rescore` | ✓ | ✓ | Dense prefetch → ColBERT `max_sim` |
-| 4 | `muvera_colbert` | ✓ | ✓ | MUVERA prefetch → exact `max_sim` (⚠️ see [Known limitations](#known-limitations)) |
-| 5 | `cross_encoder` | ✓ | ✓ | Dense prefetch → client-side cross-encoder rerank |
+| 1 | `dense` | | ✓ | The baseline itself — a single dense HNSW search, no reranking stage |
+| 2 | `colbert_rescore` | ✓ | ✓ | Dense prefetch → ColBERT `max_sim` |
+| 3 | `muvera_colbert` | ✓ | ✓ | MUVERA prefetch → exact `max_sim` (⚠️ see [Known limitations](#known-limitations)) |
+| 4 | `cross_encoder` | ✓ | ✓ | Dense prefetch → client-side cross-encoder rerank |
 
 **The baseline model is a runtime parameter, not just a config edit.** Default is
 `BAAI/bge-small-en-v1.5`; override with `--dense-model NAME` (and `--dense-model-dim N`
 if FastEmbed's own registry can't resolve the dimension for an unlisted model).
 Overriding it invalidates the pinned Gate 1 reference score, and the CLI says so.
 
-**Arm 2 uses Qdrant-native TurboQuant.** Asymmetric by construction — stored vectors
-are compressed, the query stays full precision. Bit width defaults to 4
-(`--quant-bits 4|2|1.5|1`, 8×/16×/24×/32× compression respectively). Candidate depth
-maps to Qdrant's `oversampling` search parameter as `depth / final_limit`, so at depth
-D this arm rescores D candidates — same as every prefetch-based arm, keeping the depth
-axis comparable across the whole table. Arms 1 and 2 deliberately share one collection:
-the `dense` vector carries the TurboQuant config, arm 1 passes `ignore=True` to stay
-full precision, arm 2 passes `rescore=True`. Same underlying data either way — the only
-difference is which search-time parameter each arm sets.
-
-**Arms 3 and 4 use `max_sim`**, the only multivector comparator Qdrant offers. The
+**Arms 2 and 3 use `max_sim`**, the only multivector comparator Qdrant offers. The
 ColBERT vector is indexed with HNSW `m=0` — required, not optional, since `max_sim`
 isn't symmetric — so it's never used for ANN prefetch, only for rescoring a candidate
-set that arrived some other way. That's also why arm 4 is *exact* MaxSim: MUVERA
+set that arrived some other way. That's also why arm 3 is *exact* MaxSim: MUVERA
 supplies the (approximate) prefetch, ColBERT supplies an exact rescore over it.
 
 Exclusions (representation missing for a dataset, arm gated, etc.) are always
@@ -342,15 +331,15 @@ dataset with real quality headroom past depth 200.
 ## Collection layout and ingestion
 
 **One collection per dataset, named after the dataset**, holding every representation
-as a **named vector** on the same points — `dense` (fp32, with TurboQuant attached),
-`muvera`, and `colbert`. Every arm queries that one collection, so each arm's prefetch
+as a **named vector** on the same points — `dense`, `muvera`, and `colbert`, all
+fp32. Every arm queries that one collection, so each arm's prefetch
 reads the same HNSW graph, the same payload, and the same page cache; the only thing
 that differs between arms is the strategy under test. One collection per representation
 would make arm-to-arm latency incomparable, which is the benchmark's primary axis.
 
-Only `dense` carries a quantization config, and every read of it must declare its
-precision, so exactly one arm (`quantized_rescore`) searches compressed codes and
-everything else is fp32 end to end. `colbert` is deliberately built with `m=0` — no HNSW
+No vector carries a quantization config, so every arm reads full precision end to end
+and no arm's numbers can be a comparison of two different precisions. `colbert` is
+deliberately built with `m=0` — no HNSW
 graph at all — because `max_sim` is not a metric space, so multivectors are only ever
 used for rescoring, never for prefetch.
 
@@ -365,7 +354,7 @@ different algorithms. 10 is the smallest value Qdrant accepts (it rejects 0).
 ```
 wipe storage + restart Qdrant   (clean slate; skipped by --resume-ingestion)
   -> embed corpus               (disk-cached, keyed by model + corpus + platform)
-  -> create collection          (named vectors, TurboQuant on dense, m=0 on colbert)
+  -> create collection          (named vectors, m=0 on colbert)
   -> disable indexing           (indexing_threshold = 0 for the upload)
   -> upload in size-aware batches   (sized from actual vector width, under Qdrant's 32 MB cap)
   -> restore indexing_threshold     (this is what triggers one clean HNSW build)
@@ -425,7 +414,6 @@ that cost different things:
 |---|---|
 | `storage` | the fp32 vectors themselves |
 | `index` | the HNSW graph for that vector (≈0 for ColBERT, which has `m=0` and no graph) |
-| `quantized` | the TurboQuant codes — present on `dense` only, and **additive**: Qdrant keeps the fp32 originals for rescoring |
 | `payload` | `doc_id` + `text`, reported as its own component rather than estimated |
 | `payload_index`, `id_tracker` | the remaining accounted-for structures |
 | `n_token_vectors` | ColBERT token-vector total, since "per million points" is ambiguous by ~100× on a multivector collection |
@@ -439,8 +427,8 @@ fast.
 
 Qdrant's numbers are estimates — its docs put `ram_bytes` 10–15% low, since allocations
 inside third-party libraries aren't tracked — but they describe the actual collection the
-arms query rather than a stand-in for it, and they attribute payload and quantization
-directly rather than by subtracting one measurement from another.
+arms query rather than a stand-in for it, and they attribute payload directly rather
+than by subtracting one measurement from another.
 
 **Quality**, via `ranx`: NDCG@10 (primary), Recall@10, Recall@100 (`null` below depth
 100, since an arm can't return 100 results at a shallower depth), MRR@10. Computed
@@ -471,7 +459,7 @@ run_dataset(dataset):
 
 - **`units`** — the flat list of (arm, depth) pairs to run. Non-sweeping arms (e.g.
   `dense`) contribute one unit with `depth=None`; sweeping arms (`colbert_rescore`,
-  `quantized_rescore`, `muvera_colbert`, `cross_encoder`) contribute one unit per
+  `muvera_colbert`, `cross_encoder`) contribute one unit per
   configured depth. `build_plan` also applies an initial shuffle, but that ordering is
   superseded by the per-query reshuffle below — it only matters for the plan digest
   used to validate a resume.
@@ -524,7 +512,7 @@ records already on disk unless you pass `--no-resume`.
 ```bash
 python -m src.cli run --dataset nfcorpus
 python -m src.cli run --dataset all --arms dense,colbert_rescore
-python -m src.cli run --dataset fiqa --dense-model BAAI/bge-base-en-v1.5 --quant-bits 2
+python -m src.cli run --dataset fiqa --dense-model BAAI/bge-base-en-v1.5
 ```
 
 | Flag | Default | Purpose |
@@ -539,7 +527,6 @@ python -m src.cli run --dataset fiqa --dense-model BAAI/bge-base-en-v1.5 --quant
 | `--allow-unverified-baseline` | off | proceed when the dense model's Gate 1 reference is marked `verified: false` (it is verified by default, so this is only needed after overriding the model) |
 | `--dense-model` | config | override the baseline dense model every arm reranks |
 | `--dense-model-dim` | auto | dimension of `--dense-model`, if FastEmbed's registry can't resolve it |
-| `--quant-bits` | `4` | TurboQuant bit width for `quantized_rescore`: `4`, `2`, `1.5`, or `1` |
 | `--analyse` / `--no-analyse` | on | aggregate after the run completes |
 | `--allow-partial` | off | aggregate even if some `(arm, depth)` units have incomplete records — for inspecting an interrupted run, never for a result you intend to trust |
 
@@ -712,16 +699,10 @@ Open items worth knowing before you lean on a number:
   noting: at 10,240 float32 dimensions, MUVERA's storage footprint is not dramatically
   smaller than the ColBERT multivectors it prefetches for — report that from the
   memory table rather than tuning the FDE down until the comparison flatters.
-- **TurboQuant is a disk cost, not a disk saving.** Measured at 5K × 384-dim vectors,
-  4-bit: 16,204 KB unquantized → 17,020 KB quantized. The original vectors are kept
-  for rescoring, so the compressed codes are strictly additive on disk. The actual
-  benefit is a smaller, RAM-pinnable structure for the initial search — a latency and
-  working-set-size win, not a storage win. Visible directly as the `dense` vector's
-  `quantized` component in [What gets measured](#what-gets-measured).
 - **Learning-to-rank is deliberately not an arm.** It would need per-dataset trained
   models, breaking the zero-training/drop-in-evaluable property every other arm has,
   and it wants engineered features (BM25 score among them) that this benchmark does
-  not compute. Worth a separate study with its own methodology, not a sixth row
+  not compute. Worth a separate study with its own methodology, not a fifth row
   in this table.
 - **Memory figures are Qdrant's own estimates, read once.** Its docs put `ram_bytes`
   10–15% low, because allocations inside third-party libraries are not tracked, and

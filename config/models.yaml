@@ -32,14 +32,6 @@ dense:
     observed: 0.3314
     verified: true
 
-# TurboQuant for the quantized_rescore arm. Qdrant-native, asymmetric:
-# stored vectors are compressed, the query stays full precision. `bits` is the knob the
-# user is most likely to sweep; 4 is Qdrant's own default (8x compression).
-quantization:
-  bits: "4"          # one of: "4" (8x), "2" (16x), "1.5" (24x), "1" (32x)
-  memory: pinned     # pinned | cached | cold — pinned keeps quantized vectors in RAM
-  rescore: true      # rescore candidates against the original full-precision vectors
-
 colbert:
   name: "colbert-ir/colbertv2.0"
   dim: 128

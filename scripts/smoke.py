@@ -1,4 +1,4 @@
-"""Quick end-to-end smoke test: nfcorpus, dense + quantized_rescore + colbert_rescore.
+"""Quick end-to-end smoke test: nfcorpus, dense + colbert_rescore.
 
 Trims query count, depth sweep, and repeats so the whole pipeline finishes in a couple
 minutes. Writes to results_smoke/ so it can never collide with a real run's output.
@@ -72,7 +72,7 @@ def main() -> None:
 
     summary = run_dataset(
         cfg, bundle, encoders, collection,
-        include_arms=["dense", "quantized_rescore", "colbert_rescore"],
+        include_arms=["dense", "colbert_rescore"],
         resume=True,
         log=log,
     )

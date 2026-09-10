@@ -68,10 +68,6 @@ def run(
         Optional[int],
         typer.Option(help="Dimension of --dense-model, if it can't be auto-resolved from FastEmbed's registry"),
     ] = None,
-    quant_bits: Annotated[
-        Optional[str],
-        typer.Option(help="TurboQuant bit width for quantized_rescore: 4, 2, 1.5, or 1 (default 4)"),
-    ] = None,
     analyse: Annotated[bool, typer.Option(help="Aggregate after the run completes")] = True,
     allow_partial: Annotated[
         bool,
@@ -102,18 +98,6 @@ def run(
                 "does not apply to this run's baseline; Gate 1 will fail or be meaningless "
                 "until it is re-pinned in config/models.yaml for the new model."
             )
-
-    if quant_bits:
-        if quant_bits not in {"4", "2", "1.5", "1"}:
-            raise typer.BadParameter("--quant-bits must be one of: 4, 2, 1.5, 1")
-        cfg = cfg.model_copy(
-            update={
-                "models": cfg.models.model_copy(
-                    update={"quantization": cfg.models.quantization.model_copy(update={"bits": quant_bits})}
-                )
-            }
-        )
-        _echo(f"TurboQuant bit width overridden: {quant_bits}-bit")
 
     ref = cfg.models.dense.reference
     if used_default_dense_model and not ref.verified:

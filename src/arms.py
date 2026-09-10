@@ -23,7 +23,6 @@ from qdrant_client import QdrantClient, models
 from .config import Config
 from .datasets import IdMap
 from .embedding import Encoders
-from .indexing import QUANTIZED_VECTORS
 from .timing import QueryTimers
 
 Retrieved = list[tuple[str, float]]
@@ -52,10 +51,7 @@ class ArmOutput:
     # Candidate doc ids the arm considered before its final cutoff, when that pool is
     # distinct from `retrieved` and cheap to expose. Recall against this pool bounds
     # what the rescoring stage could possibly have recovered, independent of how well
-    # it ranked what it got. None where an arm has no separate pool (`dense`) or where
-    # exposing it costs an extra query this arm doesn't otherwise need (`quantized_rescore`
-    # rescores server-side in one round trip with no way to inspect the pre-rescore
-    # selection separately).
+    # it ranked what it got. None where an arm has no separate pool (`dense`).
     pool_doc_ids: list[str] | None = None
 
 
@@ -120,39 +116,17 @@ def _guard_prefetch(depth: int, limit: int) -> None:
         raise ArmError(f"prefetch limit {depth} < final limit {limit}; would truncate results")
 
 
-# --------------------------------------------------------------- vector precision
-#
-# Every vector in this benchmark is read at full fp32 precision, with exactly one
-# deliberate exception: `quantized_rescore`, which searches TurboQuant codes and then
-# rescores the survivors against the fp32 originals.
-#
-# That invariant is not self-enforcing, because the dataset's collection attaches
-# TurboQuant to the `dense` vector (so arms 1 and 2 can share one HNSW graph) and
-# Qdrant's default is to USE quantization wherever it is configured. A dense read that
-# says nothing about precision therefore gets 4-bit codes silently — which would put a
-# rescoring arm's first stage on quantized codes while the `dense` baseline it is
-# compared against runs fp32. That confound shows up in no metric.
-#
-# So precision is mandatory rather than defaulted: `run_query` rejects any read of a
-# quantized vector that has not stated which precision it wants. Forgetting fails loudly
-# on the first query instead of quietly biasing a 16-hour run.
-
-
-def full_precision() -> models.SearchParams:
-    """Search params that bypass quantization: read the fp32 vectors, not the codes."""
-    return models.SearchParams(quantization=models.QuantizationSearchParams(ignore=True))
-
-
 def dense_prefetch(query, limit: int) -> models.Prefetch:
-    """Full-precision dense candidate generation — the first stage arms 3 and 5 share.
+    """Dense candidate generation — the first stage the prefetch-based arms share.
 
-    Identical retrieval to the `dense` baseline, so the quality difference between an
-    arm and the baseline is attributable to that arm's reranking alone.
+    Full precision, because no vector in this collection is quantized. Identical
+    retrieval to the `dense` baseline, so the quality difference between an arm and the
+    baseline is attributable to that arm's reranking alone.
     """
-    return models.Prefetch(query=query, using="dense", limit=limit, params=full_precision())
+    return models.Prefetch(query=query, using="dense", limit=limit)
 
 
-def _pool_doc_ids(ctx: ArmContext, *, query, using: str, depth: int, params=None) -> list[str] | None:
+def _pool_doc_ids(ctx: ArmContext, *, query, using: str, depth: int) -> list[str] | None:
     """Re-run a prefetch alone, to see what it handed the reranker.
 
     Qdrant's single-request prefetch-then-rescore never returns the prefetch's own
@@ -167,34 +141,9 @@ def _pool_doc_ids(ctx: ArmContext, *, query, using: str, depth: int, params=None
     scratch = QueryTimers()
     points = run_query(
         ctx, scratch, map_ids=False,
-        query=query, using=using, limit=depth, with_payload=["doc_id"], params=params,
+        query=query, using=using, limit=depth, with_payload=["doc_id"],
     )
     return [ctx.id_map.doc(p.id) for p in points]
-
-
-def _assert_precision_declared(using: str | None, params, where: str) -> None:
-    if using not in QUANTIZED_VECTORS:
-        return
-    if params is not None and params.quantization is not None:
-        return
-    raise ArmError(
-        f"{where} reads the quantized `{using}` vector without declaring a precision, so "
-        "Qdrant would silently search the compressed codes. Pass "
-        "`params=full_precision()` for an fp32 read, or explicit "
-        "`QuantizationSearchParams(ignore=False, ...)` if this really is the TurboQuant arm."
-    )
-
-
-def _check_prefetch_precision(prefetch, where: str) -> None:
-    """Validate every prefetch stage, including nested ones."""
-    if prefetch is None:
-        return
-    if isinstance(prefetch, (list, tuple)):
-        for index, entry in enumerate(prefetch):
-            _check_prefetch_precision(entry, f"{where}[{index}]")
-        return
-    _assert_precision_declared(prefetch.using, prefetch.params, f"{where} prefetch")
-    _check_prefetch_precision(prefetch.prefetch, f"{where} nested")
 
 
 # `QdrantClient.query_points()` and the REST `QueryRequest` model spell the same
@@ -240,16 +189,10 @@ def run_query(ctx: ArmContext, timers: QueryTimers, *, map_ids: bool = True, **k
     that need the raw points (`cross_encoder`, for the `text` payload) pass
     `map_ids=False` and time their own post-processing separately.
 
-    Also the single chokepoint where vector precision is validated, before anything is
-    timed or sent: every read of a quantized vector must say which precision it wants.
-
     Arms speak the `QueryRequest` vocabulary (`params`, matching `models.Prefetch.params`);
     `_for_client_method` translates it for the client-method path, which spells the same
     arguments differently.
     """
-    _assert_precision_declared(kwargs.get("using"), kwargs.get("params"), "query")
-    _check_prefetch_precision(kwargs.get("prefetch"), "query")
-
     if not ctx.capture_server_time:
         call_kwargs = _for_client_method(kwargs)
         with timers.qdrant():
@@ -272,12 +215,8 @@ def run_query(ctx: ArmContext, timers: QueryTimers, *, map_ids: bool = True, **k
 
 @register("dense", sweeps_depth=False, requires=["dense"], group="baseline")
 def dense_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
-    """The unified baseline every other arm reranks. Full precision, always.
-
-    The dense vector carries a TurboQuant config so `quantized_rescore` can share this
-    collection, so this arm bypasses quantization explicitly. Without that the baseline
-    would be a quantized search and every comparison against it would be meaningless.
-    """
+    """The unified baseline every other arm reranks: a single dense HNSW search,
+    full precision, no reranking stage."""
     timers = QueryTimers()
     limit = _final_limit(ctx, depth)
     with timers.embed():
@@ -289,53 +228,6 @@ def dense_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
         using="dense",
         limit=limit,
         with_payload=["doc_id"],
-        params=full_precision(),
-    )
-    return ArmOutput(retrieved, timers)
-
-
-@register(
-    "quantized_rescore",
-    sweeps_depth=True,
-    requires=["dense"],
-    group="rescoring",
-)
-def quantized_rescore_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
-    """TurboQuant-compressed search, then rescore against the full-precision vectors.
-
-    The ONLY arm that reads compressed vectors; everything else in this benchmark is
-    fp32 end to end. Qdrant does both halves natively in one round trip: the quantized
-    index selects `limit * oversampling` candidates, then those are re-ranked against
-    the original fp32 vectors. Depth maps to the oversampling factor as
-    `depth / final_limit`, which keeps this arm's candidate-depth axis directly
-    comparable to the prefetch-based arms — at depth D all arms rescore D candidates.
-
-    TurboQuant is asymmetric by construction: only stored vectors are compressed, the
-    query stays full precision. Bit width is `models.quantization.bits` (default 4).
-    """
-    if depth is None:
-        raise ArmError("quantized_rescore sweeps depth; depth must be set")
-    timers = QueryTimers()
-    limit = _final_limit(ctx, depth)
-    _guard_prefetch(depth, limit)
-    quant = ctx.cfg.models.quantization
-
-    with timers.embed():
-        vector_list = ctx.encoders.embed_query_dense(query).tolist()
-    retrieved = run_query(
-        ctx,
-        timers,
-        query=vector_list,
-        using="dense",
-        limit=limit,
-        with_payload=["doc_id"],
-        params=models.SearchParams(
-            quantization=models.QuantizationSearchParams(
-                ignore=False,
-                rescore=quant.rescore,
-                oversampling=depth / limit,
-            )
-        ),
     )
     return ArmOutput(retrieved, timers)
 
@@ -374,7 +266,7 @@ def colbert_rescore_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOu
         limit=limit,
         with_payload=["doc_id"],
     )
-    pool = _pool_doc_ids(ctx, query=dense_vec_list, using="dense", depth=depth, params=full_precision())
+    pool = _pool_doc_ids(ctx, query=dense_vec_list, using="dense", depth=depth)
     return ArmOutput(retrieved, timers, pool_doc_ids=pool)
 
 
@@ -385,11 +277,7 @@ def colbert_rescore_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOu
     group="rescoring",
 )
 def muvera_colbert_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
-    """MUVERA FDE prefetch, then exact ColBERT max_sim rescoring inside Qdrant.
-
-    The `muvera` vector carries no quantization config, so this prefetch is fp32
-    without needing to say so.
-    """
+    """MUVERA FDE prefetch, then exact ColBERT max_sim rescoring inside Qdrant."""
     if depth is None:
         raise ArmError("muvera_colbert sweeps depth; depth must be set")
     timers = QueryTimers()
@@ -440,7 +328,7 @@ def cross_encoder_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutp
         dense_vec_list = ctx.encoders.embed_query_dense(query).tolist()
     candidates = run_query(
         ctx, timers, map_ids=False, query=dense_vec_list, using="dense",
-        limit=depth, with_payload=["doc_id", "text"], params=full_precision(),
+        limit=depth, with_payload=["doc_id", "text"],
     )
 
     with timers.rerank():

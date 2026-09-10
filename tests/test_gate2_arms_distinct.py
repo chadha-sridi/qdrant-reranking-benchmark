@@ -6,11 +6,6 @@ didn't help", which is the wrong conclusion drawn from a bug.
 The gate takes no exemptions. Every arm reranks the dense baseline (or a prefetch
 derived from it) with a genuinely different mechanism, so if any pair ever needs an
 exemption that is itself worth investigating rather than suppressing.
-
-Note `quantized_rescore` vs `dense`: at low bit widths TurboQuant plus full-precision
-rescoring can legitimately reproduce the baseline ranking on easy queries. That is the
-arm working, not failing — but reproducing it on EVERY probe query would mean the
-quantized index is not actually being consulted, which is what this gate catches.
 """
 
 from __future__ import annotations
@@ -65,4 +60,4 @@ def test_gate2_every_declared_arm_is_accounted_for(cfg):
     accounted = {arm.name for arm in arms} | set(exclusions)
     missing = set(REGISTRY) - accounted
     assert not missing, f"arms neither run nor excluded: {sorted(missing)}"
-    assert len(REGISTRY) == 5, f"expected 5 registered arms, found {len(REGISTRY)}"
+    assert len(REGISTRY) == 4, f"expected 4 registered arms, found {len(REGISTRY)}"

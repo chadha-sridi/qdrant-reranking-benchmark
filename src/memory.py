@@ -66,11 +66,11 @@ class Component:
 
 @dataclass(frozen=True)
 class VectorMemory:
-    """One named vector: its raw vectors, its HNSW graph, and its quantized codes.
+    """One named vector, as Qdrant reports it: raw vectors, HNSW graph, quantized codes.
 
-    `quantized` is present only where a quantization config is attached (the `dense`
-    vector). Note that it is *additive*: Qdrant keeps the originals for rescoring, so
-    a quantized vector costs storage + quantized, not one instead of the other.
+    `quantized` appears only where the vector carries a quantization config, which no
+    vector in this benchmark does — it is parsed because the API can return it, and is
+    additive when present (Qdrant keeps the originals alongside the codes).
     """
 
     name: str

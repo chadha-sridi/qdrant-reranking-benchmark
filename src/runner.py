@@ -87,7 +87,6 @@ def plan_digest(cfg: Config, bundle: LoadedDataset, units: Sequence[Unit]) -> st
                 "colbert": cfg.models.colbert.name,
                 "cross_encoder": cfg.models.cross_encoder.name,
                 "muvera": cfg.models.muvera.model_dump(),
-                "quantization": cfg.models.quantization.model_dump(),
             },
             "qdrant_image": cfg.run.qdrant.image,
         }

@@ -117,7 +117,7 @@ def test_enabled_datasets_are_ordered_smallest_first():
 # -------------------------------------------------------------------------- arms
 
 
-def test_registry_has_five_arms_and_no_hybrid_or_formula_arms():
+def test_registry_has_four_arms_and_no_hybrid_or_formula_arms():
     """Every registered arm reranks the one unified dense baseline.
 
     Hybrid-fusion arms (bm25/rrf/rrf_weighted/dbsf) and formula_rrf are out of scope:
@@ -127,23 +127,21 @@ def test_registry_has_five_arms_and_no_hybrid_or_formula_arms():
     from src.arms import REGISTRY
 
     assert set(REGISTRY) == {
-        "dense", "quantized_rescore", "colbert_rescore", "muvera_colbert",
-        "cross_encoder",
+        "dense", "colbert_rescore", "muvera_colbert", "cross_encoder",
     }
     assert "formula_rrf" not in REGISTRY
     # Every arm except the baseline sweeps candidate depth.
     assert {a.name for a in REGISTRY.values() if a.sweeps_depth} == {
-        "quantized_rescore", "colbert_rescore", "cross_encoder", "muvera_colbert",
+        "colbert_rescore", "cross_encoder", "muvera_colbert",
     }
 
 
 def test_pool_doc_ids_declared_only_where_cheap_or_meaningful():
-    """dense has no separate pool; quantized_rescore's pool isn't inspectable without
-    a second query it doesn't otherwise need. The other three expose one."""
+    """dense has no separate pool. The other three expose one."""
     from src.arms import REGISTRY
 
     exposes_pool = {"colbert_rescore", "muvera_colbert", "cross_encoder"}
-    no_pool = {"dense", "quantized_rescore"}
+    no_pool = {"dense"}
     assert exposes_pool | no_pool == set(REGISTRY)
 
 
@@ -192,7 +190,7 @@ def test_pool_doc_ids_capture_is_untimed_and_config_gated(monkeypatch):
     assert len(calls) == 1, "disabled must not issue the call at all"
 
 
-def test_resolve_arms_matches_the_five_arm_default_set():
+def test_resolve_arms_matches_the_four_arm_default_set():
     cfg = load_config()
     from src.arms import resolve_arms
 
@@ -200,7 +198,7 @@ def test_resolve_arms_matches_the_five_arm_default_set():
     assert not exclusions, f"unexpected exclusions: {exclusions}"
     assert {a.name for a in arms} == set(cfg.run.arms.enabled)
     assert set(cfg.run.arms.enabled) == {
-        "dense", "quantized_rescore", "colbert_rescore", "muvera_colbert", "cross_encoder",
+        "dense", "colbert_rescore", "muvera_colbert", "cross_encoder",
     }
 
 
@@ -230,15 +228,6 @@ def test_depths_override_wins_over_every_dataset_own_override():
     assert overridden.depths_for("scifact") == [10, 50]
 
 
-def test_turboquant_bits_map_to_qdrant_enum():
-    from qdrant_client import models
-
-    cfg = load_config()
-    assert cfg.models.quantization.bits == "4", "4-bit is the configured default"
-    assert cfg.models.quantization.bit_size == models.TurboQuantBitSize.BITS4
-    assert cfg.models.quantization.memory_mode == models.Memory.PINNED
-
-
 def test_resolve_arms_excludes_by_missing_representation():
     """A dataset that does not index a representation excludes the arms needing it."""
     cfg = load_config()
@@ -257,94 +246,7 @@ def test_resolve_arms_excludes_by_missing_representation():
     assert "colbert_rescore" in exclusions
 
 
-# -------------------------------------------------------------- vector precision
-#
-# Every vector is read at fp32 except `quantized_rescore`, which is the whole point of
-# that arm. The dataset's collection attaches TurboQuant to `dense`, and Qdrant's default
-# is to USE quantization where configured, so a dense read that says nothing gets 4-bit
-# codes silently — which would put a rescoring arm's first stage on compressed codes
-# while the `dense` baseline it is compared against runs fp32. No metric would reveal
-# that, so these tests hold the invariant instead.
-
-
-def test_only_the_dense_vector_is_quantized():
-    """The precision guard's scope must match what vectors_config actually quantizes."""
-    from qdrant_client import models
-
-    from src.indexing import QUANTIZED_VECTORS, vectors_config
-
-    cfg = load_config()
-    spec = cfg.datasets.get("nfcorpus")
-    config = vectors_config(cfg, spec, ["dense", "colbert", "muvera"])
-
-    quantized = {
-        name: params for name, params in config.items() if params.quantization_config is not None
-    }
-    assert set(quantized) == set(QUANTIZED_VECTORS) == {"dense"}
-    assert isinstance(config["dense"].quantization_config, models.TurboQuantization)
-
-
-def test_full_precision_params_bypass_quantization():
-    from src.arms import dense_prefetch, full_precision
-
-    assert full_precision().quantization.ignore is True
-
-    prefetch = dense_prefetch([0.1, 0.2], limit=50)
-    assert prefetch.using == "dense"
-    assert prefetch.limit == 50
-    assert prefetch.params.quantization.ignore is True
-
-
-def test_undeclared_precision_on_a_quantized_vector_is_rejected():
-    """Forgetting the params must fail loudly, not silently search compressed codes."""
-    from src.arms import ArmError, _assert_precision_declared, _check_prefetch_precision
-    from qdrant_client import models
-
-    with pytest.raises(ArmError, match="without declaring a precision"):
-        _assert_precision_declared("dense", None, "query")
-
-    # SearchParams present but silent about quantization is still undeclared.
-    with pytest.raises(ArmError, match="without declaring a precision"):
-        _assert_precision_declared("dense", models.SearchParams(hnsw_ef=128), "query")
-
-    with pytest.raises(ArmError, match="without declaring a precision"):
-        _check_prefetch_precision(
-            [models.Prefetch(query=[0.1], using="dense", limit=10)], "query"
-        )
-
-    # Nested prefetch stages are checked too, not just the outermost one.
-    with pytest.raises(ArmError, match="without declaring a precision"):
-        _check_prefetch_precision(
-            models.Prefetch(
-                query=[0.1],
-                using="muvera",
-                limit=10,
-                prefetch=models.Prefetch(query=[0.1], using="dense", limit=10),
-            ),
-            "query",
-        )
-
-
-def test_declared_precision_is_accepted_in_both_directions():
-    """Explicit fp32 and the deliberate TurboQuant opt-in both pass the guard."""
-    from src.arms import _assert_precision_declared, _check_prefetch_precision, dense_prefetch, full_precision
-    from qdrant_client import models
-
-    _assert_precision_declared("dense", full_precision(), "query")
-    _assert_precision_declared(
-        "dense",
-        models.SearchParams(
-            quantization=models.QuantizationSearchParams(
-                ignore=False, rescore=True, oversampling=2.0
-            )
-        ),
-        "query",
-    )
-    _check_prefetch_precision([dense_prefetch([0.1], limit=10)], "query")
-
-    # Unquantized vectors need no declaration at all.
-    _assert_precision_declared("colbert", None, "query")
-    _check_prefetch_precision([models.Prefetch(query=[0.1], using="muvera", limit=10)], "query")
+# ------------------------------------------------------------------ query transport
 
 
 def test_query_kwargs_are_valid_on_both_transports():
@@ -358,25 +260,25 @@ def test_query_kwargs_are_valid_on_both_transports():
 
     from qdrant_client import QdrantClient, models
 
-    from src.arms import _for_client_method, full_precision
+    from src.arms import _for_client_method
 
     arm_kwargs = {
         "query": [0.1, 0.2],
         "using": "dense",
         "limit": 10,
         "with_payload": ["doc_id"],
-        "params": full_precision(),
+        "params": models.SearchParams(hnsw_ef=128),
     }
 
     # REST path: the model accepts the arm's own vocabulary.
-    assert models.QueryRequest(**arm_kwargs).params.quantization.ignore is True
+    assert models.QueryRequest(**arm_kwargs).params.hnsw_ef == 128
 
     # Client-method path: translated names must all exist in the real signature.
     translated = _for_client_method(arm_kwargs)
     accepted = set(inspect.signature(QdrantClient.query_points).parameters)
     unknown = set(translated) - accepted
     assert not unknown, f"kwargs the client method would reject: {sorted(unknown)}"
-    assert translated["search_params"].quantization.ignore is True
+    assert translated["search_params"].hnsw_ef == 128
     assert "params" not in translated
 
 
@@ -620,23 +522,6 @@ def test_upsert_batch_is_capped_below_qdrant_payload_limit():
 
     floats = estimate_point_floats(cfg, vectors, reps, 200)
     assert http * floats * 14 < 32 * 1024**2
-
-
-def test_the_dense_vector_always_carries_quantization():
-    """quantized_rescore needs the codes present however few vectors are requested.
-
-    A dense vector built without the quantization config would leave that arm searching
-    fp32 while reporting itself as the TurboQuant arm, and its cost would vanish from the
-    memory table (Qdrant reports it as the `dense` vector's `quantized` component).
-    """
-    from src.indexing import vectors_config
-
-    cfg = load_config()
-    spec = cfg.datasets.get("nfcorpus")
-
-    for reps in (["dense"], ["dense", "colbert", "muvera"]):
-        config = vectors_config(cfg, spec, reps)
-        assert config["dense"].quantization_config is not None, reps
 
 
 def test_upsert_batch_respects_configured_ceiling_for_narrow_vectors():

@@ -166,42 +166,6 @@ class DenseModel(_Frozen):
     reference: DenseReference
 
 
-class QuantizationModel(_Frozen):
-    """TurboQuant config for the quantized-rescore arm.
-
-    Qdrant natively supports TurboQuant at 4/2/1.5/1 bits with automatic asymmetric
-    quantization: stored vectors are compressed, queries stay full precision. Rescoring
-    against the original vectors is a search-time parameter, so one collection serves
-    both the full-precision baseline (quantization ignored) and the quantized arm.
-    """
-
-    bits: Literal["4", "2", "1.5", "1"] = "4"
-    memory: Literal["pinned", "cached", "cold"] = "pinned"
-    # depth maps to Qdrant's oversampling factor as depth / final_limit.
-    rescore: bool = True
-
-    @property
-    def bit_size(self):
-        from qdrant_client import models as _m
-
-        return {
-            "4": _m.TurboQuantBitSize.BITS4,
-            "2": _m.TurboQuantBitSize.BITS2,
-            "1.5": _m.TurboQuantBitSize.BITS1_5,
-            "1": _m.TurboQuantBitSize.BITS1,
-        }[self.bits]
-
-    @property
-    def memory_mode(self):
-        from qdrant_client import models as _m
-
-        return {
-            "pinned": _m.Memory.PINNED,
-            "cached": _m.Memory.CACHED,
-            "cold": _m.Memory.COLD,
-        }[self.memory]
-
-
 class ColbertModel(_Frozen):
     name: str
     dim: int
@@ -252,7 +216,6 @@ class CrossEncoderModel(_Frozen):
 
 class ModelsConfig(_Frozen):
     dense: DenseModel
-    quantization: QuantizationModel
     colbert: ColbertModel
     muvera: MuveraModel
     cross_encoder: CrossEncoderModel

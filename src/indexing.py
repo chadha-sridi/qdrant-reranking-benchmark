@@ -19,13 +19,6 @@ from .datasets import LoadedDataset, iter_batches
 from .embedding import Encoders, EmbeddingCache
 from .qdrant_control import QdrantController
 
-# Named vectors that carry a quantization config, and are therefore the only ones where a
-# search can land on compressed data. `vectors_config` below is what makes this true;
-# `arms.py` reads this set to require every such search to declare the precision it wants,
-# so an arm can never silently measure 4-bit codes.
-# Keep the two in sync: attaching quantization to another vector means adding it here.
-QUANTIZED_VECTORS = frozenset({"dense"})
-
 
 def collection_name(dataset: str) -> str:
     """One collection per dataset, named after it. Kept as a function so call sites read
@@ -132,25 +125,9 @@ def embed_corpus(
 
 
 def _dense_params(
-    cfg: Config, dim: int, distance: models.Distance, *, quantized: bool = False
+    cfg: Config, dim: int, distance: models.Distance
 ) -> models.VectorParams:
-    """Dense vector params. `quantized` attaches TurboQuant.
-
-    One collection serves both the full-precision baseline and the quantized arm:
-    Qdrant keeps the original vectors for rescoring, and whether a given query uses the
-    compressed index is a search-time parameter (`QuantizationSearchParams.ignore`), not
-    a storage decision. So the `dense` vector carries the quantization config and each
-    arm opts in or out per query.
-    """
-    quantization_config = None
-    if quantized:
-        q = cfg.models.quantization
-        quantization_config = models.TurboQuantization(
-            turbo=models.TurboQuantQuantizationConfig(
-                memory=q.memory_mode,
-                bits=q.bit_size,
-            )
-        )
+    """Params for a single-vector (non-multivector) named vector."""
     return models.VectorParams(
         size=dim,
         distance=distance,
@@ -159,7 +136,6 @@ def _dense_params(
             ef_construct=cfg.run.qdrant.hnsw.ef_construct,
             full_scan_threshold=cfg.run.qdrant.hnsw.full_scan_threshold_kb,
         ),
-        quantization_config=quantization_config,
     )
 
 
@@ -244,15 +220,14 @@ def vectors_config(
 ) -> dict:
     """Named-vector config.
 
-    The `dense` vector always carries TurboQuant so arms 1 and 2 can share one collection;
-    Qdrant keeps the fp32 originals alongside the codes, and quantization's own cost is
-    reported separately as that vector's `quantized` component.
+    Every vector is stored and read at full precision, so all arms sharing one collection
+    read byte-identical data and their differences are their reranking alone.
     """
     dense_cfg: dict[str, models.VectorParams] = {}
 
     if "dense" in representations:
         dense_cfg["dense"] = _dense_params(
-            cfg, cfg.models.dense.dim, _distance(cfg.models.dense.distance), quantized=True
+            cfg, cfg.models.dense.dim, _distance(cfg.models.dense.distance)
         )
     if "muvera" in representations:
         dense_cfg["muvera"] = _dense_params(
@@ -694,9 +669,8 @@ def _config_matches(
 ) -> bool:
     """Is an existing collection's vector config the one this run would create?
 
-    Only the vector names, sizes, distances, and whether quantization is attached are
-    compared — those are what make stored points reusable. A mismatch means the points
-    on disk were built for a different configuration and cannot be resumed into.
+    Only the vector names, sizes, and distances are compared — those are what make
+    stored points reusable. A mismatch means the points on disk cannot be resumed into.
     """
     try:
         existing = (client.get_collection(name).config.params.vectors) or {}
@@ -708,8 +682,6 @@ def _config_matches(
     for vector_name, want in wanted.items():
         have = existing[vector_name]
         if have.size != want.size or have.distance != want.distance:
-            return False
-        if (have.quantization_config is not None) != (want.quantization_config is not None):
             return False
     return True
 

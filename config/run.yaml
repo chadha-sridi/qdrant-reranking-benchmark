@@ -84,10 +84,9 @@ ingestion:
 arms:
   enabled:
     - dense              # arm 1: the unified baseline every other arm reranks
-    - quantized_rescore  # arm 2: TurboQuant search -> full-precision rescore
-    - colbert_rescore    # arm 3: dense prefetch -> ColBERT MaxSim
-    - muvera_colbert     # arm 4: MUVERA prefetch -> exact MaxSim
-    - cross_encoder      # arm 5: dense prefetch -> client-side cross-encoder
+    - colbert_rescore    # arm 2: dense prefetch -> ColBERT MaxSim
+    - muvera_colbert     # arm 3: MUVERA prefetch -> exact MaxSim
+    - cross_encoder      # arm 4: dense prefetch -> client-side cross-encoder
   # Declared but gated. Flip via CLI flags, not by editing this list.
   gated: {}
 

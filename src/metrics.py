@@ -274,9 +274,7 @@ def aggregate(
         }
         if memory_by_representation:
             # One column set per named vector the arm reads. The breakdown is exported
-            # alongside the total because storage, HNSW graph, and quantized codes scale
-            # differently — and TurboQuant's cost is the `quantized` component, so
-            # quantized_rescore's price appears here rather than needing its own vector.
+            # alongside the total because raw storage and the HNSW graph scale differently.
             for rep in meta.get("requires", ()):
                 mem = memory_by_representation.get(rep) or {}
                 total = mem.get("total") or {}
@@ -284,9 +282,6 @@ def aggregate(
                 row[f"mem_{rep}_working_set_bytes"] = total.get("working_set_bytes")
                 row[f"mem_{rep}_storage_disk_bytes"] = (mem.get("storage") or {}).get("disk_bytes")
                 row[f"mem_{rep}_index_disk_bytes"] = (mem.get("index") or {}).get("disk_bytes")
-                row[f"mem_{rep}_quantized_disk_bytes"] = (mem.get("quantized") or {}).get(
-                    "disk_bytes"
-                )
         rows.append(row)
 
     out = pd.DataFrame(rows)

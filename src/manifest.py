@@ -79,7 +79,6 @@ def base_manifest(
         },
         "models": {
             "dense": cfg.models.dense.model_dump(),
-            "quantization": cfg.models.quantization.model_dump(),
             "colbert": cfg.models.colbert.model_dump(),
             "muvera": {**cfg.models.muvera.model_dump(), "dim": cfg.models.muvera.dim},
             "cross_encoder": cfg.models.cross_encoder.model_dump(),
