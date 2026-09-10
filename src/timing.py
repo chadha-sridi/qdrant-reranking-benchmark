@@ -3,15 +3,13 @@
 The split between client-side and server-side time is the central finding of the
 project, so the three components are accumulated separately and never summed before
 storage. `t_qdrant_ms` is the sum of all Qdrant round trips an arm makes, issued
-serially; `n_qdrant_calls` records how many, so a one-call arm is
-distinguishable from a two-call arm in the raw data.
+serially.
 
 `t_qdrant_server_ms` is Qdrant's OWN reported processing time, summed over the same
-calls. It matters because 40-60% of the client-observed round trip is transport and
-response deserialisation, not search: at limit=500 a measured 9.6 ms round trip was 5.8 ms
-of server time and 3.9 ms of client-side overhead. Attributing all of it to Qdrant would
-overstate server cost and understate client cost, which is the one comparison this whole
-project exists to make.
+calls, read from the gRPC response. It matters because a large share of the
+client-observed round trip is transport and response deserialisation, not search.
+Attributing all of it to Qdrant would overstate server cost and understate client cost,
+which is the one comparison this whole project exists to make.
 """
 
 from __future__ import annotations
@@ -27,10 +25,8 @@ class QueryTimers:
     t_embed_ms: float = 0.0
     t_qdrant_ms: float = 0.0
     t_rerank_ms: float = 0.0
-    # Qdrant's self-reported server-side time. None when the transport does not expose
-    # it (the gRPC path in qdrant-client discards it).
+    # Qdrant's self-reported server-side time, accumulated across this query's calls.
     t_qdrant_server_ms: float | None = None
-    n_qdrant_calls: int = 0
 
     @contextmanager
     def embed(self) -> Iterator[None]:
@@ -47,7 +43,6 @@ class QueryTimers:
             yield
         finally:
             self.t_qdrant_ms += (time.perf_counter() - start) * 1000.0
-            self.n_qdrant_calls += 1
 
     @contextmanager
     def rerank(self) -> Iterator[None]:
@@ -86,5 +81,4 @@ class QueryTimers:
             "t_qdrant_overhead_ms": (
                 None if self.t_qdrant_overhead_ms is None else round(self.t_qdrant_overhead_ms, 4)
             ),
-            "n_qdrant_calls": self.n_qdrant_calls,
         }

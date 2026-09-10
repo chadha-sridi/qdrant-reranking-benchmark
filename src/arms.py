@@ -19,6 +19,8 @@ from typing import Callable, Sequence
 
 import numpy as np
 from qdrant_client import QdrantClient, models
+from qdrant_client import grpc as qgrpc
+from qdrant_client.conversions.conversion import GrpcToRest, RestToGrpc
 
 from .config import Config
 from .datasets import IdMap
@@ -40,8 +42,6 @@ class ArmContext:
     id_map: IdMap
     collection: str
     dataset: str
-    # Record Qdrant's self-reported server time alongside the round trip.
-    capture_server_time: bool = True
 
 
 @dataclass
@@ -146,20 +146,6 @@ def _pool_doc_ids(ctx: ArmContext, *, query, using: str, depth: int) -> list[str
     return [ctx.id_map.doc(p.id) for p in points]
 
 
-# `QdrantClient.query_points()` and the REST `QueryRequest` model spell the same
-# arguments differently: the method takes `search_params`/`query_filter`, the model takes
-# `params`/`filter`. `run_query` feeds one kwargs dict to whichever transport is active,
-# so the two vocabularies have to be reconciled somewhere. Arms use the model's names
-# (which also match `models.Prefetch.params`, identical on both transports) and this maps
-# them for the method — without it, the method raises "Unknown arguments: ['params']" and
-# every arm that declares search params fails whenever server-time capture is off.
-_CLIENT_METHOD_RENAMES = {"params": "search_params", "filter": "query_filter"}
-
-
-def _for_client_method(kwargs: dict) -> dict:
-    return {_CLIENT_METHOD_RENAMES.get(key, key): value for key, value in kwargs.items()}
-
-
 def _to_retrieved(points, id_map: IdMap) -> Retrieved:
     out: Retrieved = []
     for point in points:
@@ -175,38 +161,64 @@ def _to_retrieved(points, id_map: IdMap) -> Retrieved:
     return out
 
 
-def run_query(ctx: ArmContext, timers: QueryTimers, *, map_ids: bool = True, **kwargs):
-    """Issue one Qdrant query, timing the round trip and Qdrant's own reported time.
+def _query_message(
+    ctx: ArmContext,
+    *,
+    query,
+    using: str,
+    limit: int,
+    with_payload: Sequence[str],
+    prefetch: models.Prefetch | Sequence[models.Prefetch] | None = None,
+    params: models.SearchParams | None = None,
+) -> qgrpc.QueryPoints:
+    """Build the gRPC request from an arm's REST-flavoured arguments.
 
-    Every arm goes through here so the two timers can never drift apart. The REST
-    transport is used when server-time capture is on, because qdrant-client discards the
-    server `time` field on the gRPC path.
+    Arms express intent in the documented REST vocabulary (`models.Prefetch`, plain
+    vectors, a list of payload keys); this is the single place that translates it. Every
+    supported argument is named explicitly rather than forwarded as **kwargs, so an
+    argument this function does not understand is a TypeError at the call site instead of
+    a silently dropped search parameter.
+
+    A bare vector has to be wrapped in `NearestQuery` before conversion — the converter
+    rejects a raw list. `Prefetch` resolves its own inner query, so it needs no wrapping.
+    """
+    prefetches = None
+    if prefetch is not None:
+        listed = prefetch if isinstance(prefetch, (list, tuple)) else [prefetch]
+        prefetches = [RestToGrpc.convert_prefetch_query(p) for p in listed]
+    return qgrpc.QueryPoints(
+        collection_name=ctx.collection,
+        query=RestToGrpc.convert_query(models.NearestQuery(nearest=query)),
+        prefetch=prefetches,
+        using=using,
+        limit=limit,
+        with_payload=RestToGrpc.convert_with_payload_interface(list(with_payload)),
+        params=RestToGrpc.convert_search_params(params) if params is not None else None,
+    )
+
+
+def run_query(ctx: ArmContext, timers: QueryTimers, *, map_ids: bool = True, **kwargs):
+    """Issue one Qdrant query over gRPC, timing the round trip and Qdrant's own time.
+
+    Every arm goes through here so the two timers can never drift apart. gRPC carries
+    Qdrant's self-reported processing time in the response (`QueryResponse.time`), which
+    is what makes the server/transport split measurable without paying JSON's cost —
+    `QdrantClient.query_points()` drops that field, so the stub is called directly.
 
     `map_ids=True` (the default) converts the response to `Retrieved` (doc_id, score)
     INSIDE the same timer block as the round trip, so response deserialisation and
     ID-map lookup are charged to `t_qdrant_ms` rather than falling into an untimed gap
-    between this call returning and the caller processing it. Arms
-    that need the raw points (`cross_encoder`, for the `text` payload) pass
-    `map_ids=False` and time their own post-processing separately.
-
-    Arms speak the `QueryRequest` vocabulary (`params`, matching `models.Prefetch.params`);
-    `_for_client_method` translates it for the client-method path, which spells the same
-    arguments differently.
+    between this call returning and the caller processing it. Arms that need the raw
+    points (`cross_encoder`, for the `text` payload) pass `map_ids=False` and time their
+    own post-processing separately.
     """
-    if not ctx.capture_server_time:
-        call_kwargs = _for_client_method(kwargs)
-        with timers.qdrant():
-            result = ctx.client.query_points(collection_name=ctx.collection, **call_kwargs)
-            points = result.points
-            return _to_retrieved(points, ctx.id_map) if map_ids else points
-
-    request = models.QueryRequest(**kwargs)
+    request = _query_message(ctx, **kwargs)
     with timers.qdrant():
-        response = ctx.client.http.search_api.query_points(
-            collection_name=ctx.collection, query_request=request
+        response = ctx.client.grpc_points.Query(
+            request, timeout=ctx.cfg.run.qdrant.timeout_s
         )
-        timers.add_server_time(getattr(response, "time", None))
-        points = response.result.points
+        timers.add_server_time(response.time)
+        points = [GrpcToRest.convert_scored_point(hit) for hit in response.result]
         return _to_retrieved(points, ctx.id_map) if map_ids else points
 
 

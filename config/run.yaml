@@ -41,6 +41,8 @@ execution:
 qdrant:
   url: "http://localhost:6333"
   grpc_port: 6334
+  # Transport for indexing. Queries always use gRPC regardless: Qdrant's self-reported
+  # processing time is only readable off the gRPC response, and that split is the point.
   prefer_grpc: true
   timeout_s: 120
   image: "qdrant/qdrant:v1.19.0"
@@ -65,11 +67,6 @@ qdrant:
   # Restored after the upload finishes, which is what triggers the HNSW build. Indexing
   # is switched off during the upload itself. Qdrant's default is 20000 (KB).
   indexing_threshold_kb: 20000
-  # Record Qdrant's own reported processing time alongside the client-observed round
-  # trip. 40-60% of the round trip is transport + deserialisation, not search, so this
-  # is what makes the client/server split defensible. Requires REST:
-  # enabling it forces prefer_grpc=false for the measured queries.
-  capture_server_time: true
 
 ingestion:
   # Documents embedded and upserted together before moving to the next chunk. At this

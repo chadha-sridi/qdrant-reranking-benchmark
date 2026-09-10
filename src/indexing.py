@@ -687,15 +687,13 @@ def _config_matches(
 
 
 def build_client(cfg: Config, *, for_queries: bool = False) -> QdrantClient:
-    """Build a client. Query clients drop to REST when server-time capture is on.
+    """Build a client. Query clients always use gRPC.
 
-    qdrant-client discards Qdrant's `time` field on the gRPC path, so capturing
-    server-side time requires REST. Indexing still uses the configured transport,
-    since gRPC batches far more points per request.
+    Queries read Qdrant's self-reported processing time off the gRPC response, so that
+    transport is a requirement of the measurement rather than a preference. Indexing
+    follows the configured transport, where gRPC batches far more points per request.
     """
-    prefer_grpc = cfg.run.qdrant.prefer_grpc
-    if for_queries and cfg.run.qdrant.capture_server_time:
-        prefer_grpc = False
+    prefer_grpc = True if for_queries else cfg.run.qdrant.prefer_grpc
     return QdrantClient(
         url=cfg.run.qdrant.url,
         prefer_grpc=prefer_grpc,

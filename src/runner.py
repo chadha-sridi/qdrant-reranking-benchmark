@@ -172,7 +172,6 @@ def run_dataset(
             id_map=bundle.id_map,
             collection=collection,
             dataset=dataset,
-            capture_server_time=cfg.run.qdrant.capture_server_time,
         )
 
         if resume:
@@ -217,7 +216,7 @@ def run_dataset(
                             skipped += 1
                             continue
                         output = unit.arm(ctx, text, unit.depth)
-                        extra = {"n_qdrant_calls": output.timers.n_qdrant_calls}
+                        extra: dict = {}
                         if unit.arm.license_note:
                             extra["license_note"] = unit.arm.license_note
                         if output.pool_doc_ids is not None:

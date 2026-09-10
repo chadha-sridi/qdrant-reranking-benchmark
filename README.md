@@ -398,12 +398,19 @@ and only aggregated at analysis time:
 | `t_qdrant_overhead_ms` | `t_qdrant_ms - t_qdrant_server_ms` — transport + response deserialization |
 | `t_rerank_ms` | client-side reranking (non-zero only for `cross_encoder`) |
 | `t_total_ms` | sum of the above |
-| `n_qdrant_calls` | how many Qdrant round trips this arm made for this query |
 
-The server/overhead split matters more than it looks: measured overhead has ranged
-40–60% of the total round trip depending on arm and payload size, so attributing
-everything to "Qdrant" would misstate the client/server cost split this benchmark
-exists to measure.
+Reported as p50/p95 across queries. p99 is not reported: at one pass per query there is
+one latency sample per query, and a p99 off that would be false precision.
+
+The server/overhead split matters more than it looks — a large share of the
+client-observed round trip is transport and response deserialization, not search, so
+attributing all of it to "Qdrant" would misstate the client/server cost split this
+benchmark exists to measure.
+
+Queries go over **gRPC**, and read Qdrant's self-reported processing time straight off
+the response (`QueryResponse.time`). `QdrantClient.query_points()` discards that field,
+so `run_query` calls the gRPC stub directly — which is what makes the server/transport
+split measurable without paying JSON's serialization cost on every query.
 
 **Memory**, read from Qdrant's own per-collection accounting
 (`GET /collections/{name}/memory`, Qdrant 1.18+) on the same collection the arms
@@ -430,11 +437,21 @@ inside third-party libraries aren't tracked — but they describe the actual col
 arms query rather than a stand-in for it, and they attribute payload directly rather
 than by subtracting one measurement from another.
 
-**Quality**, via `ranx`: NDCG@10 (primary), Recall@10, Recall@100 (`null` below depth
-100, since an arm can't return 100 results at a shallower depth), MRR@10. Computed
-from `run_idx 0` only — retrieval is deterministic given a fixed index, so repeat runs
-would triple-count identical rankings into a significance test. Pairwise significance
-uses `ranx.compare` with both raw and Bonferroni-corrected verdicts.
+**Quality**, via `ranx`: **NDCG@10** (primary) and **Recall@10**. Computed from
+`run_idx 0` only — retrieval is deterministic given a fixed index, so counting repeated
+passes would inflate a significance test's sample size. Pairwise significance uses
+`ranx.compare` with both raw and Bonferroni-corrected verdicts.
+
+Metrics are always recomputed post-hoc from the stored ranking, never baked in at
+capture time, so the reported set can change without re-running anything.
+
+**`recall_at_pool_depth`**, the ceiling on Recall@10: what fraction of a query's
+relevant documents were even present in the prefetch pool at that depth, before
+rescoring ran. It separates "the reranker failed to promote a relevant document it
+had" from "the pool never contained it, so go deeper". Captured at query time (the
+pool itself is never persisted, only this count), and `null` for `dense`, which has no
+separate pool. At depth 10 it equals Recall@10 exactly — there the pool *is* the
+output.
 
 ---
 

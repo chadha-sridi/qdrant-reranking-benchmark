@@ -145,46 +145,51 @@ def test_pool_doc_ids_declared_only_where_cheap_or_meaningful():
     assert exposes_pool | no_pool == set(REGISTRY)
 
 
-def test_pool_doc_ids_capture_is_untimed_and_config_gated(monkeypatch):
-    """The extra prefetch-alone call must land in a throwaway timer, never the arm's
-    own — corrupting the real latency measurement would defeat the point of it."""
-    from src.arms import ArmContext, QueryTimers, _pool_doc_ids
-    from src.config import load_config
+def test_pool_doc_ids_capture_is_untimed_and_config_gated():
+    """The pool probe must be structurally unable to touch the arm's own timers, and
+    must issue no call at all when disabled."""
+    import inspect
+
+    from qdrant_client import grpc as qgrpc
+
+    from src.arms import ArmContext, _pool_doc_ids
     from src.datasets import IdMap
 
     cfg = load_config()
     id_map = IdMap.build("d", ["docA", "docB"])
     calls = []
 
-    class FakePoint:
-        def __init__(self, id_):
-            self.id = id_
+    class FakeGrpcPoints:
+        def Query(self, request, timeout=None):
+            calls.append(request)
+            return qgrpc.QueryResponse(
+                result=[
+                    qgrpc.ScoredPoint(id=qgrpc.PointId(num=0), score=0.9),
+                    qgrpc.ScoredPoint(id=qgrpc.PointId(num=1), score=0.8),
+                ],
+                time=0.001,
+            )
 
     class FakeClient:
-        capture_server_time = False
-
-        def query_points(self, **kwargs):
-            calls.append(kwargs)
-            return type("R", (), {"points": [FakePoint(0), FakePoint(1)]})()
+        grpc_points = FakeGrpcPoints()
 
     ctx = ArmContext(
         client=FakeClient(), cfg=cfg, encoders=None, id_map=id_map,
-        collection="c", dataset="d", capture_server_time=False,
+        collection="c", dataset="d",
     )
-    real_timers = QueryTimers()
-    pool = _pool_doc_ids(ctx, query=[0.1], using="muvera", depth=10)
-
-    assert pool == ["docA", "docB"]
-    assert real_timers.n_qdrant_calls == 0, "the pool probe must not touch the real query's timers"
+    assert _pool_doc_ids(ctx, query=[0.1], using="muvera", depth=10) == ["docA", "docB"]
     assert len(calls) == 1
 
-    # Disabled via config: no call at all, not just an untimed one.
+    # It takes no timers argument, so it cannot write into the arm's measurement.
+    assert "timers" not in inspect.signature(_pool_doc_ids).parameters
+
+    # Disabled via config: no call at all, not merely an untimed one.
     disabled = cfg.model_copy(update={"run": cfg.run.model_copy(update={
         "execution": cfg.run.execution.model_copy(update={"capture_pool_recall": False})
     })})
     ctx_disabled = ArmContext(
         client=FakeClient(), cfg=disabled, encoders=None, id_map=id_map,
-        collection="c", dataset="d", capture_server_time=False,
+        collection="c", dataset="d",
     )
     assert _pool_doc_ids(ctx_disabled, query=[0.1], using="muvera", depth=10) is None
     assert len(calls) == 1, "disabled must not issue the call at all"
@@ -249,37 +254,48 @@ def test_resolve_arms_excludes_by_missing_representation():
 # ------------------------------------------------------------------ query transport
 
 
-def test_query_kwargs_are_valid_on_both_transports():
-    """`params` is REST-only naming; the client method calls it `search_params`.
+def test_query_message_accepts_arm_vocabulary_and_rejects_unknown_arguments():
+    """Arms speak REST vocabulary; one place translates it to gRPC.
 
-    run_query feeds one kwargs dict to whichever transport is active, so without the
-    translation an arm that declares search params fails with "Unknown arguments:
-    ['params']" whenever capture_server_time is off. Both spellings must work.
+    The explicit signature matters: a search parameter this function does not understand
+    must be a TypeError at the call site, never a silently dropped argument that changes
+    what was measured.
     """
-    import inspect
+    from qdrant_client import models
 
-    from qdrant_client import QdrantClient, models
+    from src.arms import ArmContext, _query_message
+    from src.datasets import IdMap
 
-    from src.arms import _for_client_method
+    cfg = load_config()
+    ctx = ArmContext(
+        client=None, cfg=cfg, encoders=None,
+        id_map=IdMap.build("d", ["docA"]), collection="c", dataset="d",
+    )
 
-    arm_kwargs = {
-        "query": [0.1, 0.2],
-        "using": "dense",
-        "limit": 10,
-        "with_payload": ["doc_id"],
-        "params": models.SearchParams(hnsw_ef=128),
-    }
+    msg = _query_message(
+        ctx,
+        prefetch=[models.Prefetch(query=[0.1, 0.2], using="dense", limit=50)],
+        query=[[0.1, 0.2], [0.3, 0.4]],           # multivector, as colbert arms send
+        using="colbert", limit=10, with_payload=["doc_id"],
+        params=models.SearchParams(hnsw_ef=128),
+    )
+    assert msg.collection_name == "c"
+    assert msg.using == "colbert"
+    assert msg.limit == 10
+    assert len(msg.prefetch) == 1
+    assert msg.params.hnsw_ef == 128
 
-    # REST path: the model accepts the arm's own vocabulary.
-    assert models.QueryRequest(**arm_kwargs).params.hnsw_ef == 128
+    # A bare (non-multivector) query is accepted too.
+    assert _query_message(
+        ctx, query=[0.1, 0.2], using="dense", limit=5, with_payload=["doc_id"]
+    ).limit == 5
 
-    # Client-method path: translated names must all exist in the real signature.
-    translated = _for_client_method(arm_kwargs)
-    accepted = set(inspect.signature(QdrantClient.query_points).parameters)
-    unknown = set(translated) - accepted
-    assert not unknown, f"kwargs the client method would reject: {sorted(unknown)}"
-    assert translated["search_params"].hnsw_ef == 128
-    assert "params" not in translated
+    # An argument it does not model must fail loudly, not vanish.
+    with pytest.raises(TypeError):
+        _query_message(
+            ctx, query=[0.1], using="dense", limit=5, with_payload=["doc_id"],
+            score_threshold=0.9,
+        )
 
 
 def test_full_scan_threshold_is_a_value_qdrant_accepts():
@@ -618,7 +634,6 @@ def test_timers_accumulate_independently():
     with timers.qdrant():
         pass
     payload = timers.as_dict()
-    assert payload["n_qdrant_calls"] == 2
     assert payload["t_rerank_ms"] == 0.0
     assert payload["t_total_ms"] == pytest.approx(
         payload["t_embed_ms"] + payload["t_qdrant_ms"] + payload["t_rerank_ms"], abs=1e-3
@@ -656,16 +671,17 @@ def test_server_time_accumulates_over_multiple_round_trips():
     assert timers.t_qdrant_server_ms == pytest.approx(5.0)
 
 
-def test_query_client_drops_to_rest_when_capturing_server_time():
-    """gRPC discards Qdrant's time field, so capture requires REST."""
+def test_query_client_always_uses_grpc():
+    """Server-reported time is only readable off the gRPC response, so queries require it."""
     from src.indexing import build_client
 
     cfg = load_config()
-    assert cfg.run.qdrant.capture_server_time is True
-    assert cfg.run.qdrant.prefer_grpc is True, "indexing should still prefer gRPC"
-    # Indexing keeps gRPC; only the query client is forced to REST.
-    assert build_client(cfg, for_queries=False)._client._prefer_grpc is True
-    assert build_client(cfg, for_queries=True)._client._prefer_grpc is False
+    assert build_client(cfg, for_queries=True)._client._prefer_grpc is True
+    # Even if the configured transport were REST, a query client still needs gRPC.
+    rest_cfg = cfg.model_copy(update={"run": cfg.run.model_copy(update={
+        "qdrant": cfg.run.qdrant.model_copy(update={"prefer_grpc": False})})})
+    assert build_client(rest_cfg, for_queries=True)._client._prefer_grpc is True
+    assert build_client(rest_cfg, for_queries=False)._client._prefer_grpc is False
 
 
 def test_latency_components_include_the_server_split():
@@ -676,11 +692,12 @@ def test_latency_components_include_the_server_split():
 
 
 def test_timers_record_time_even_on_exception():
+    """A failed call still cost wall-clock time; dropping it would understate latency."""
     timers = QueryTimers()
     with pytest.raises(RuntimeError):
         with timers.qdrant():
             raise RuntimeError("boom")
-    assert timers.n_qdrant_calls == 1
+    assert timers.t_qdrant_ms > 0
 
 
 # ------------------------------------------------------------------------ storage

@@ -102,10 +102,6 @@ class QdrantConfig(_Frozen):
     # is what triggers one clean index build instead of repeatedly indexing partial
     # segments. Qdrant's own default is 20000; a collection left at 0 stays unindexed.
     indexing_threshold_kb: int = 20000
-    # Capture Qdrant's self-reported server time. Only the REST transport exposes it
-    # (qdrant-client drops it on the gRPC path), so enabling this forces HTTP for the
-    # measured queries.
-    capture_server_time: bool = True
 
 
 class IngestionConfig(_Frozen):

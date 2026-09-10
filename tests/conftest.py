@@ -74,7 +74,6 @@ def arm_context(cfg, nfcorpus, encoders, nfcorpus_collection):
         id_map=nfcorpus.id_map,
         collection=nfcorpus_collection,
         dataset="nfcorpus",
-        capture_server_time=cfg.run.qdrant.capture_server_time,
     )
     yield ctx
     client.close()
