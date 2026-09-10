@@ -6,8 +6,8 @@ Two rules that shape everything below:
   * Quality comes from run_idx 0 only. Retrieval is deterministic given a fixed index,
     so repeated passes return identical lists; counting each one would inflate a
     significance test's sample size.
-  * recall@100 is null wherever depth < 100, because the arm could not return 100
-    documents.
+  * QUALITY_METRICS is ndcg@10 and recall@10 only; both are always well-defined at
+    every configured depth (depths never go below final_limit).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 PRIMARY_METRIC = "ndcg@10"
-QUALITY_METRICS = ("ndcg@10", "recall@10", "recall@100", "mrr@10")
+QUALITY_METRICS = ("ndcg@10", "recall@10")
 LATENCY_COMPONENTS = (
     "t_embed_ms",
     "t_qdrant_ms",
@@ -45,6 +45,31 @@ class MetricsError(RuntimeError):
 def count_relevant(qrels_for_query: dict[str, int], doc_ids: Sequence[str]) -> int:
     """How many of `doc_ids` are relevant per this query's qrels (grade > 0)."""
     return sum(1 for doc_id in doc_ids if qrels_for_query.get(doc_id, 0) > 0)
+
+
+def pool_recall(
+    records: Sequence[dict], qrels: dict[str, dict[str, int]], *, run_idx: int = 0
+) -> float | None:
+    """Mean, across queries, of (relevant docs in the prefetch pool / relevant docs total).
+
+    The ceiling on `recall@10`: what fraction of a query's relevant documents were even
+    available to the reranker at this depth, before rescoring ever ran. None where no
+    record in `records` exposes a pool (`dense` has none); a query with zero relevant
+    qrels is excluded, the same convention `recall@10` uses.
+    """
+    ratios = []
+    for r in records:
+        if int(r.get("run_idx", 0)) != run_idx:
+            continue
+        pool_count = r.get("n_relevant_in_pool")
+        if pool_count is None:
+            continue
+        judged = qrels.get(r["query_id"], {})
+        total_relevant = count_relevant(judged, judged.keys())
+        if total_relevant == 0:
+            continue
+        ratios.append(pool_count / total_relevant)
+    return sum(ratios) / len(ratios) if ratios else None
 
 
 def build_run_dict(records: Sequence[dict], *, run_idx: int = 0) -> dict[str, dict[str, float]]:
@@ -268,6 +293,7 @@ def aggregate(
             "depth": depth_value,
             "n_queries": len(run),
             **quality,
+            "recall_at_pool_depth": pool_recall(group_records, qrels),
             **latency,
             "client_side_rerank": meta.get("client_side_rerank"),
             "license_note": meta.get("license_note"),

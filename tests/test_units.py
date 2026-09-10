@@ -748,6 +748,30 @@ def test_count_relevant_counts_graded_matches_only():
     assert count_relevant({}, ["docA"]) == 0
 
 
+def test_pool_recall_averages_per_query_ratios():
+    from src.metrics import pool_recall
+
+    qrels = {
+        "q1": {"docA": 1, "docB": 1, "docC": 0},  # 2 relevant
+        "q2": {"docX": 1},  # 1 relevant
+        "q3": {},  # 0 relevant -> excluded, not a divide-by-zero
+    }
+    records = [
+        {"query_id": "q1", "run_idx": 0, "n_relevant_in_pool": 1},  # 1/2
+        {"query_id": "q2", "run_idx": 0, "n_relevant_in_pool": 1},  # 1/1
+        {"query_id": "q3", "run_idx": 0, "n_relevant_in_pool": 0},  # excluded
+        {"query_id": "q1", "run_idx": 1, "n_relevant_in_pool": 0},  # wrong run_idx, ignored
+    ]
+    assert pool_recall(records, qrels) == pytest.approx((0.5 + 1.0) / 2)
+
+
+def test_pool_recall_is_none_when_nothing_exposes_a_pool():
+    from src.metrics import pool_recall
+
+    dense_records = [{"query_id": "q1", "run_idx": 0}]  # no n_relevant_in_pool key
+    assert pool_recall(dense_records, {"q1": {"docA": 1}}) is None
+
+
 def test_recall_at_100_is_unsupported_below_depth_100():
     assert _metric_supported("recall@100", 100) is True
     assert _metric_supported("recall@100", 50) is False

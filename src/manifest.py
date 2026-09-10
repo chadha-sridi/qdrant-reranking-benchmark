@@ -99,8 +99,6 @@ def base_manifest(
             "matrices are seeded and their digest is recorded below.",
             "Quality metrics come from run_idx 0 only; all timing runs feed the latency "
             "percentiles.",
-            "recall@100 is null wherever depth < 100, because the arm cannot return 100 "
-            "documents at that depth.",
         ],
         "exclusions": {},
         "datasets": {},
