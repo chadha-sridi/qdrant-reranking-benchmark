@@ -38,7 +38,7 @@ def _parse_depths(depths: Optional[str]) -> Optional[list[int]]:
 
 @app.command()
 def run(
-    dataset: Annotated[str, typer.Option(help="Dataset name, or 'all' for every enabled dataset")] = "nfcorpus",
+    dataset: Annotated[str, typer.Option(help="Dataset name, or 'all' for the default set. Naming a dataset explicitly runs it even if it is out of that set.")] = "nfcorpus",
     arms: Annotated[str, typer.Option(help="Comma-separated arm names, or 'all'")] = "all",
     depths: Annotated[Optional[str], typer.Option(help="Override the depth sweep, e.g. 10,50,100")] = None,
     resume: Annotated[bool, typer.Option(help="Skip records already on disk")] = True,
@@ -111,11 +111,8 @@ def run(
             )
         _echo("WARNING: proceeding with an unverified Gate 1 baseline (--allow-unverified-baseline).")
 
-    names = (
-        [spec.name for spec in cfg.datasets.enabled_ordered]
-        if dataset.strip().lower() == "all"
-        else [dataset]
-    )
+    run_all = dataset.strip().lower() == "all"
+    names = [spec.name for spec in cfg.datasets.enabled_ordered] if run_all else [dataset]
     requested_arms = _parse_arms(arms, cfg)
 
     if not resume and not overwrite:
@@ -150,9 +147,11 @@ def run(
 
     for name in names:
         spec = cfg.datasets.get(name)
-        if not spec.enabled:
-            _echo(f"[skip] {name}: {spec.disabled_reason or 'disabled in config'}")
-            merge(manifest_path, {"exclusions": {name: {"__dataset__": spec.disabled_reason or "disabled"}}})
+        # `enabled` governs the default set only. Naming a dataset explicitly runs it,
+        # which is how the ones kept out of `--dataset all` for cost are run on demand.
+        if not spec.enabled and run_all:
+            _echo(f"[skip] {name}: {spec.disabled_reason or 'not in the default set'}")
+            merge(manifest_path, {"exclusions": {name: {"__dataset__": spec.disabled_reason or "not in the default set"}}})
             continue
 
         _echo(f"\n=== {name} ===")
@@ -254,11 +253,8 @@ def aggregate(
 ) -> None:
     """Re-aggregate from existing raw records without re-running any query."""
     cfg = load_config()
-    names = (
-        [spec.name for spec in cfg.datasets.enabled_ordered]
-        if dataset.strip().lower() == "all"
-        else [dataset]
-    )
+    run_all = dataset.strip().lower() == "all"
+    names = [spec.name for spec in cfg.datasets.enabled_ordered] if run_all else [dataset]
     for name in names:
         bundle = load_dataset_bundle(cfg, name)
         for label, path in analyse_dataset(cfg, bundle, allow_partial=allow_partial).items():

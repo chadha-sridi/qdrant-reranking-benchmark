@@ -192,7 +192,8 @@ def load_dataset_bundle(cfg: Config, dataset_name: str, *, cache_dir: Path | Non
     if not judged:
         raise QrelsError(f"{dataset_name}: no queries have judgements in split {spec.qrels_split!r}")
 
-    subsample = _subsample(judged, cfg.run.queries.cap, cfg.run.seeds.query_subsample)
+    cap = spec.query_cap if spec.query_cap is not None else cfg.run.queries.cap
+    subsample = _subsample(judged, cap, cfg.run.seeds.query_subsample)
     warmup_ids, eval_ids = _hold_out_warmup(
         subsample, cfg.run.queries.warmup_count, cfg.run.seeds.warmup_holdout
     )
@@ -315,7 +316,7 @@ def _persist_query_split(path: Path, bundle: LoadedDataset, cfg: Config) -> None
     payload = {
         "dataset": bundle.spec.name,
         "seeds": cfg.run.seeds.model_dump(),
-        "cap": cfg.run.queries.cap,
+        "cap": bundle.spec.query_cap if bundle.spec.query_cap is not None else cfg.run.queries.cap,
         "warmup_count": cfg.run.queries.warmup_count,
         "n_corpus": len(bundle.documents),
         "corpus_digest": bundle.corpus_digest,

@@ -79,19 +79,45 @@ def test_colbert_config_rejects_nonzero_m():
         )
 
 
-def test_dataset_set_is_the_agreed_five():
+def test_dataset_set_is_the_agreed_five_with_quora_out_of_the_default_set():
+    """Quora is configured but out of `--dataset all`: it is ~80% of the runtime."""
     cfg = load_config()
     assert set(cfg.datasets.datasets) == {"nfcorpus", "scifact", "scidocs", "fiqa", "quora"}
-    assert all(s.enabled for s in cfg.datasets.datasets.values()), "all five run by default"
+    assert [s.name for s in cfg.datasets.enabled_ordered] == [
+        "nfcorpus", "scifact", "scidocs", "fiqa",
+    ]
+    quora = cfg.datasets.get("quora")
+    assert not quora.enabled
+    assert quora.disabled_reason, "a dataset out of the default set must say why"
 
 
-def test_no_dataset_caps_its_queries():
-    """Every dataset runs every judged query it has."""
+def test_only_quora_caps_its_queries():
+    """Every dataset in the default set runs every judged query it has."""
     cfg = load_config()
     assert cfg.run.queries.cap is None, (
-        "the benchmark configuration must not cap queries; cap exists only so smoke "
-        "tests can limit them"
+        "the global cap must stay unset; it exists only so smoke tests can limit every "
+        "dataset at once"
     )
+    for spec in cfg.datasets.enabled_ordered:
+        assert spec.query_cap is None, f"{spec.name} must run every judged query"
+    assert cfg.datasets.get("quora").query_cap == 500
+
+
+def test_per_dataset_cap_takes_precedence_over_the_global_cap():
+    """A dataset's own cap wins; the global one only fills in where there is none."""
+    from src.datasets import _subsample
+
+    ids = [f"q{i}" for i in range(1000)]
+    cfg = load_config()
+    quora, nfcorpus = cfg.datasets.get("quora"), cfg.datasets.get("nfcorpus")
+
+    def effective(spec, global_cap):
+        return spec.query_cap if spec.query_cap is not None else global_cap
+
+    assert len(_subsample(ids, effective(quora, None), seed=1)) == 500
+    assert len(_subsample(ids, effective(nfcorpus, None), seed=1)) == 1000
+    # A global cap (smoke tests) still applies where a dataset sets none.
+    assert len(_subsample(ids, effective(nfcorpus, 20), seed=1)) == 20
 
 
 def test_uncapped_subsample_returns_every_query_sorted():

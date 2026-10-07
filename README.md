@@ -166,12 +166,12 @@ Five BEIR datasets, run smallest corpus first.
 | **SciFact** | 5,183 | Scientific claim verification — retrieve abstracts that support or refute a claim. ~1.1 relevant docs per query, so effectively one correct answer each. |
 | **SCIDOCS** | 25,657 | Scientific paper retrieval from citation context. Exactly 5 relevant docs per query, always — an unusually uniform relevance profile. |
 | **FiQA-2018** | 57,638 | Financial opinion question answering over investor forum posts. ~2.6 relevant docs per query. |
-| **Quora** | 522,931 | Duplicate-question retrieval. ~1.6 relevant docs per query. Largest corpus here, so ColBERT multivectors are forced on-disk. Its 10,000 queries make it ~90% of the benchmark's total compute. |
+| **Quora** *(out of the default set)* | 522,931 | Duplicate-question retrieval. ~1.6 relevant docs per query. Largest corpus here, so ColBERT multivectors are forced on-disk — the only dataset exercising that regime. Kept out of `--dataset all` and capped at 500 queries because all 10,000 would be ~80% of the benchmark's runtime; run it explicitly with `--dataset quora`. |
 
 Together they span 144× in corpus size and 1.1→38 in relevance density, so a strategy
 that only wins on sparse-judgment or only on dense-judgment data can't hide.
 
-**Query counts. No dataset caps its queries** — every judged query runs:
+**Query counts.** Every dataset in the default set runs every judged query it has:
 
 | Dataset | Judged queries | Warmup holdout | **Evaluated** |
 |---|---:|---:|---:|
@@ -179,16 +179,21 @@ that only wins on sparse-judgment or only on dense-judgment data can't hide.
 | SciFact | 300 | 50 | **250** |
 | SCIDOCS | 1,000 | 50 | **950** |
 | FiQA-2018 | 648 | 50 | **598** |
-| Quora | 10,000 | 50 | **9,950** |
-| | | | **12,021 total** |
+| | | | **2,071 total (default set)** |
+| Quora *(separate run)* | 500 of 10,000 | 50 | **450** |
 
 Warmup queries are held out purely so no evaluated query is served from a cache the
 warmup pass warmed — **nothing is trained**, there is no train/test split.
 
-Uncapping is a deliberate precision-over-compute choice: more queries only ever tightens
-confidence intervals, and the cost is concentrated almost entirely in Quora's
-`cross_encoder` (see [Cost](#cost-and-runtime)). `queries.cap` in `config/run.yaml` is
-`null` for the benchmark and exists only so smoke tests can limit query counts.
+Uncapping the default set is a deliberate precision-over-compute choice: more queries
+only ever tighten confidence intervals. Quora is the one exception — its 10,000 queries
+carry ~80% of the benchmark's runtime for a dataset that saturates by depth 50, so it
+carries a `query_cap` of 500 and sits out of the default set. Metrics are computed per
+dataset and never pooled across them, so running Quora separately does not affect any
+other dataset's numbers.
+
+`queries.cap` in `config/run.yaml` is `null` and is a smoke-test knob that caps every
+dataset at once; a dataset's own `query_cap` in `config/datasets.yaml` takes precedence.
 
 Only NFCorpus ships graded relevance; the loader never collapses grades and asserts the
 observed grade set matches config, which would catch a parser that silently flattened
@@ -279,22 +284,23 @@ PubMed-style abstracts; expect a different figure on short-document corpora.
 |---|---:|
 | Dense (bge-small) | ~1.4h |
 | ColBERT | ~2.0h |
-| **Total** | **~3.4h** (Quora alone is ~2.9h of it) |
+| **Total** | **~3.4h** for all five (Quora alone is ~2.9h; the default set is ~0.5h) |
 
-**Per full run** — querying, 12,021 evaluated queries at `repeats: 1`. `cross_encoder` is
-~97% of it:
+**Per full run** — querying at `repeats: 1`, all four arms, every evaluated query.
+`cross_encoder` is ~97% of it:
 
-| Dataset | Depths | Est. hours |
-|---|---|---:|
-| nfcorpus | 10/25/50/100/200/500 | ~2.8h |
-| scifact | 10/25/50/100/200 | ~1.2h |
-| scidocs | 10/25/50/100/200 | ~3.9h |
-| fiqa | 10/25/50/100/200 | ~2.5h |
-| **quora** | 10/25/50/100/200 | **~38.7h** |
-| **Total** | | **~49h** |
+| Dataset | Depths | Evaluated queries | Est. hours |
+|---|---|---:|---:|
+| nfcorpus | 10/25/50/100/200/500 | 273 | ~2.8h |
+| scifact | 10/25/50/100/200 | 250 | ~1.2h |
+| scidocs | 10/25/50/100/200 | 950 | ~3.9h |
+| fiqa | 10/25/50/100/200 | 598 | ~2.5h |
+| **`--dataset all` total** | | **2,071** | **~10.4h** |
+| quora *(separate, capped)* | 10/25/50/100/200 | 450 | ~1.8h |
+| quora *(uncapped, if you lift the cap)* | 10/25/50/100/200 | 9,950 | ~38.7h |
 
-Capping Quora at 500 queries brings the total to **~12.5h** while keeping the
-large-corpus data point and the on-disk ColBERT regime it is the only source of.
+Quora sits out of the default set for exactly this reason: uncapped it is ~80% of the
+total for a dataset that saturates by depth 50.
 
 Measured per-query cost at depth 500 shows where it all goes:
 
@@ -315,12 +321,10 @@ Levers, in order of effect:
 
 | Change | Saves | Costs you |
 |---|---|---|
-| Cap Quora at 500 queries | ~37h | 4.5× wider CI on the one large-corpus dataset |
+| Lift Quora's 500-query cap | costs ~37h | tighter CI on the one large-corpus dataset |
 | Cap `cross_encoder` at depth ≤100 | ~75% of its cost | the deep end of its depth curve only |
 | Drop NFCorpus depth 500 | ~1.3h | the only depth point past 200 with real headroom |
-
-| Drop `cross_encoder` entirely | ~140h | your only client-side reranking arm |
-| Cap Quora at 500 queries | ~110h | 4.5× wider CI on the one large-corpus dataset |
+| Drop `cross_encoder` entirely | ~10h of the ~10.4h | your only client-side reranking arm |
 
 Depth 500 on NFCorpus costs 17.4s/query for `cross_encoder` alone — ~1.3h, roughly half
 of NFCorpus's total. It is kept because NFCorpus (38 relevant docs/query) is the only
@@ -527,10 +531,22 @@ records already on disk unless you pass `--no-resume`.
 ### `run` — index, measure memory, execute, aggregate
 
 ```bash
+python -m src.cli run --dataset all              # the four-dataset default set, ~10.4h
+python -m src.cli run --dataset quora            # Quora on its own, capped at 500 queries
 python -m src.cli run --dataset nfcorpus
 python -m src.cli run --dataset all --arms dense,colbert_rescore
 python -m src.cli run --dataset fiqa --dense-model BAAI/bge-base-en-v1.5
 ```
+
+`--dataset all` runs the default set only. Quora is configured but excluded from it
+(`enabled: false`), because uncapped it is ~80% of the benchmark's runtime. **Naming a
+dataset explicitly runs it regardless of that flag**, which is how Quora is run — on its
+own, without redoing the other four. It carries `query_cap: 500` in
+`config/datasets.yaml`; delete that line to run all 10,000.
+
+Running Quora separately does not affect any other dataset's numbers: each dataset gets
+its own collection, its own shuffled execution plan, and its own aggregation. Metrics
+are never pooled across datasets, so there is nothing for a separate run to bias.
 
 | Flag | Default | Purpose |
 |---|---|---|

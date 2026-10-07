@@ -237,6 +237,9 @@ class DatasetSpec(_Frozen):
     measure_memory: bool
     # Per-dataset candidate-depth override; null falls back to execution.depths.
     depths: list[int] | None = None
+    # Per-dataset query cap; null runs every judged query. Takes precedence over the
+    # global queries.cap, which exists only so smoke tests can limit every dataset.
+    query_cap: int | None = None
     excluded_arms: dict[str, str] = Field(default_factory=dict)
     disabled_reason: str | None = None
     notes: str | None = None

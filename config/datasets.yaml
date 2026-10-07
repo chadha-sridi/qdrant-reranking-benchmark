@@ -88,7 +88,11 @@ datasets:
     expected_grades: [0, 1]
     representations: [dense, colbert, muvera]
     colbert_on_disk_threshold: 0       # force on-disk multivectors at this scale
-    enabled: true
-    # 1.6 relevant docs/query (median 1, p75 1, max 75); saturates by depth 50.
-    # Uncapped like every other dataset, so all 10,000 judged queries run. That is
-    # deliberate and expensive: it is ~90% of the benchmark's cross_encoder cost.
+    # Out of the default set, and capped when run. All 10,000 judged queries would be
+    # ~39h, about 80% of the whole benchmark, for a dataset that saturates by depth 50
+    # (1.6 relevant docs/query; median 1, p75 1, max 75). Run it on its own with
+    # `--dataset quora`; metrics are computed per dataset, so running it separately
+    # changes nothing about them.
+    enabled: false
+    disabled_reason: "out of the default set for cost; run explicitly with --dataset quora"
+    query_cap: 500
