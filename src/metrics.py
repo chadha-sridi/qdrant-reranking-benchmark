@@ -24,6 +24,9 @@ PRIMARY_METRIC = "ndcg@10"
 QUALITY_METRICS = ("ndcg@10", "recall@10")
 LATENCY_COMPONENTS = (
     "t_embed_ms",
+    "t_embed_dense_ms",
+    "t_embed_colbert_ms",
+    "t_embed_muvera_ms",
     "t_qdrant_ms",
     "t_qdrant_server_ms",
     "t_qdrant_overhead_ms",

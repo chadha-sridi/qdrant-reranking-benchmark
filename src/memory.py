@@ -1,7 +1,7 @@
 """Per-representation memory, read from Qdrant's own accounting.
 
 Qdrant 1.18+ reports memory for a collection at `GET /collections/{name}/memory`,
-broken down per named vector into `storage` / `index` / `quantized`, with `payload`,
+broken down per named vector into `storage` / `index`, with `payload`,
 `payload_index` and the id tracker reported separately.
 
 Caveat to carry into any writeup: these are Qdrant's own estimates. Its docs put
@@ -66,21 +66,15 @@ class Component:
 
 @dataclass(frozen=True)
 class VectorMemory:
-    """One named vector, as Qdrant reports it: raw vectors, HNSW graph, quantized codes.
-
-    `quantized` appears only where the vector carries a quantization config, which no
-    vector in this benchmark does — it is parsed because the API can return it, and is
-    additive when present (Qdrant keeps the originals alongside the codes).
-    """
+    """One named vector, as Qdrant reports it: the raw vectors and the HNSW graph."""
 
     name: str
     storage: Component
     index: Component
-    quantized: Component | None = None
 
     @property
     def total(self) -> Component:
-        parts = [self.storage, self.index] + ([self.quantized] if self.quantized else [])
+        parts = (self.storage, self.index)
         return Component(
             disk_bytes=sum(p.disk_bytes for p in parts),
             ram_bytes=sum(p.ram_bytes for p in parts),
@@ -89,15 +83,12 @@ class VectorMemory:
         )
 
     def as_dict(self) -> dict:
-        out = {
+        return {
             "name": self.name,
             "storage": self.storage.as_dict(),
             "index": self.index.as_dict(),
             "total": self.total.as_dict(),
         }
-        if self.quantized is not None:
-            out["quantized"] = self.quantized.as_dict()
-        return out
 
 
 @dataclass(frozen=True)
@@ -178,12 +169,10 @@ def read_collection_memory(
         name = entry.get("name")
         if not name:
             continue
-        quantized = entry.get("quantized")
         vectors[name] = VectorMemory(
             name=name,
             storage=Component.parse(entry.get("storage")),
             index=Component.parse(entry.get("index")),
-            quantized=Component.parse(quantized) if quantized else None,
         )
 
     other = result.get("other") or {}

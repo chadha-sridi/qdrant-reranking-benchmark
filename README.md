@@ -112,8 +112,8 @@ src/
 ├── qdrant_control.py    container lifecycle (start/stop/wipe)
 ├── arms.py              the arm registry — one `@register`-decorated function per
 │                       reranking strategy
-├── timing.py             the per-query timer set (embed / round-trip / server /
-│                       overhead / rerank)
+├── timing.py             the per-query timer set (embed per encoder / round-trip /
+│                       server / overhead / rerank)
 ├── storage.py           raw JSONL writer and crash-safe resume
 ├── runner.py             execution plan (shuffle + interleave), warmup, the main loop
 ├── metrics.py            ranx wrappers, latency percentiles, significance testing
@@ -133,7 +133,6 @@ scripts/
 └── smoke.py             trimmed end-to-end run (2 arms, ~20 queries) for a fast check
 
 docker-compose.yml           pinned Qdrant image, no forced platform (native by default)
-docker-compose.amd64.yml     opt-in override to reproduce a Linux/amd64 target
 ```
 
 ---
@@ -391,17 +390,24 @@ ColBERT pass (~2.9 h) loses that pass. Once cached, it is reused for free.
 
 ## What gets measured
 
-**Latency**, three independent timers per query, recorded raw (per query, per pass)
-and only aggregated at analysis time:
+**Latency**, independent timers per query, recorded raw (per query, per pass) and
+only aggregated at analysis time:
 
 | Field | What it is |
 |---|---|
-| `t_embed_ms` | client-side query embedding |
+| `t_embed_dense_ms` | client-side dense query embedding (`dense`, `colbert_rescore`, `cross_encoder`) |
+| `t_embed_colbert_ms` | client-side ColBERT query embedding (`colbert_rescore`, `muvera_colbert`) |
+| `t_embed_muvera_ms` | the MUVERA FDE transform of the ColBERT query tokens (`muvera_colbert` only) |
+| `t_embed_ms` | sum of the three embedding buckets |
 | `t_qdrant_ms` | client-observed round trip, summed across all Qdrant calls an arm makes |
 | `t_qdrant_server_ms` | Qdrant's own self-reported processing time for the same calls |
 | `t_qdrant_overhead_ms` | `t_qdrant_ms - t_qdrant_server_ms` — transport + response deserialization |
 | `t_rerank_ms` | client-side reranking (non-zero only for `cross_encoder`) |
-| `t_total_ms` | sum of the above |
+| `t_total_ms` | `t_embed_ms + t_qdrant_ms + t_rerank_ms` |
+
+Each arm embeds its own query, so an arm's `t_embed_ms` is what a deployment running
+that arm alone would pay. The per-encoder buckets put the encoders side by side on the
+same queries: a bucket an arm does not use is recorded as 0.
 
 Reported as p50/p95 across queries. p99 is not reported: at one pass per query there is
 one latency sample per query, and a p99 off that would be false precision.

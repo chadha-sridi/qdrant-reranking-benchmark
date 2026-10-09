@@ -1,8 +1,7 @@
 # Image tag is pinned; the manifest records it, and a result is only reproducible
 # against the exact image. No `platform` is set deliberately: Qdrant ships a multi-arch
 # manifest, so this runs NATIVE to whatever host executes it (no emulation) and latency
-# is real for that machine. Use docker-compose.amd64.yml as an override to force
-# linux/amd64 instead.
+# is real for that machine.
 services:
   qdrant:
     image: qdrant/qdrant:v1.19.0

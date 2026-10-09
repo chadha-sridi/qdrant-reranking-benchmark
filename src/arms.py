@@ -102,9 +102,8 @@ def register(
 def _final_limit(ctx: ArmContext, depth: int | None) -> int:
     """Stored result count: min(max_stored_results, depth).
 
-    Recall@100 is only meaningful where depth >= 100; below that the arm cannot return
-    100 documents at all, so it returns `depth` and the metric is emitted as null
-    rather than as a misleadingly small number.
+    Records keep more than the top-10 the quality metrics read, so a later analysis can
+    look deeper without re-running; an arm can never return more than its own depth.
     """
     cap = ctx.cfg.run.execution.max_stored_results
     return cap if depth is None else min(cap, depth)
@@ -231,7 +230,7 @@ def dense_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
     full precision, no reranking stage."""
     timers = QueryTimers()
     limit = _final_limit(ctx, depth)
-    with timers.embed():
+    with timers.embed("dense"):
         vector_list = ctx.encoders.embed_query_dense(query).tolist()
     retrieved = run_query(
         ctx,
@@ -266,8 +265,9 @@ def colbert_rescore_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOu
     limit = _final_limit(ctx, depth)
     _guard_prefetch(depth, limit)
 
-    with timers.embed():
+    with timers.embed("dense"):
         dense_vec_list = ctx.encoders.embed_query_dense(query).tolist()
+    with timers.embed("colbert"):
         colbert_tokens_list = ctx.encoders.embed_query_colbert(query).tolist()
     retrieved = run_query(
         ctx,
@@ -296,10 +296,11 @@ def muvera_colbert_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOut
     limit = _final_limit(ctx, depth)
     _guard_prefetch(depth, limit)
 
-    with timers.embed():
+    with timers.embed("colbert"):
         colbert_tokens = ctx.encoders.embed_query_colbert(query)
-        muvera_vec_list = ctx.encoders.muvera.process_query(colbert_tokens).tolist()
         colbert_tokens_list = colbert_tokens.tolist()
+    with timers.embed("muvera"):
+        muvera_vec_list = ctx.encoders.muvera.process_query(colbert_tokens).tolist()
     retrieved = run_query(
         ctx,
         timers,
@@ -336,7 +337,7 @@ def cross_encoder_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutp
     timers = QueryTimers()
     limit = _final_limit(ctx, depth)
     _guard_prefetch(depth, limit)
-    with timers.embed():
+    with timers.embed("dense"):
         dense_vec_list = ctx.encoders.embed_query_dense(query).tolist()
     candidates = run_query(
         ctx, timers, map_ids=False, query=dense_vec_list, using="dense",

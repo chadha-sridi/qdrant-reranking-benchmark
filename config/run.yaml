@@ -1,7 +1,7 @@
 # Global run configuration. Every value here lands in results/manifest.json.
 
 seeds:
-  query_subsample: 20250813   # picks the 500-query subsample
+  query_subsample: 20250813   # picks the query subsample where a dataset is capped
   warmup_holdout: 20250813    # picks the warmup pool
   plan_shuffle: 20250813      # execution-plan shuffle
   muvera: 20250813            # SimHash + projection matrices
@@ -22,7 +22,7 @@ execution:
   # ever served latency percentiles. One pass already yields one sample per evaluated
   # query per (arm, depth), which is ample for p50/p95; p99 is not reported.
   repeats: 1
-  final_limit: 10             # k for ndcg@10 / recall@10 / mrr@10
+  final_limit: 10             # k for ndcg@10 / recall@10
   max_stored_results: 100     # capped to min(this, depth)
   flush_every: 25             # fsync cadence on raw JSONL
   # Default candidate depths, grounded in the measured relevant-docs-per-query

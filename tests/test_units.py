@@ -5,6 +5,7 @@ These run without Docker or model downloads.
 
 from __future__ import annotations
 
+import inspect
 import json
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from src.config import ExecutionConfig, load_config
 from src.datasets import IdMap, IdMapError, _hold_out_warmup, _subsample
 from src.metrics import (
+    LATENCY_COMPONENTS,
     _metric_supported,
     kendall_tau_b,
     latency_percentiles,
@@ -19,7 +21,7 @@ from src.metrics import (
     top_k_overlap,
 )
 from src.storage import RawRecord, RawWriter, completed_keys, repair_truncated, unit_slug
-from src.timing import QueryTimers
+from src.timing import EMBED_STAGES, QueryTimers
 
 
 # ------------------------------------------------------------------------ config
@@ -653,7 +655,7 @@ def test_warmup_shrinks_rather_than_starving_a_small_query_set():
 
 def test_timers_accumulate_independently():
     timers = QueryTimers()
-    with timers.embed():
+    with timers.embed("dense"):
         pass
     with timers.qdrant():
         pass
@@ -664,6 +666,35 @@ def test_timers_accumulate_independently():
     assert payload["t_total_ms"] == pytest.approx(
         payload["t_embed_ms"] + payload["t_qdrant_ms"] + payload["t_rerank_ms"], abs=1e-3
     )
+
+
+def test_embed_time_is_bucketed_per_encoder_and_summed():
+    """Each encoder's query-side cost is recorded on its own; t_embed_ms is their sum."""
+    timers = QueryTimers(t_embed_dense_ms=1.0, t_embed_colbert_ms=2.0, t_embed_muvera_ms=4.0)
+    assert timers.t_embed_ms == pytest.approx(7.0)
+    payload = timers.as_dict()
+    assert payload["t_embed_dense_ms"] == 1.0
+    assert payload["t_embed_colbert_ms"] == 2.0
+    assert payload["t_embed_muvera_ms"] == 4.0
+    assert payload["t_embed_ms"] == pytest.approx(7.0)
+    assert payload["t_total_ms"] == pytest.approx(7.0)
+
+
+def test_embed_rejects_an_unknown_stage():
+    with pytest.raises(ValueError, match="unknown embed stage"):
+        with QueryTimers().embed("sparse"):
+            pass
+
+
+def test_every_arm_buckets_its_query_embedding():
+    """No arm may use an unbucketed embed timer: every encoder call names its stage."""
+    import re
+    from src import arms as arms_module
+
+    source = inspect.getsource(arms_module)
+    assert "timers.embed()" not in source
+    stages = set(re.findall(r'timers\.embed\("(\w+)"\)', source))
+    assert stages == set(EMBED_STAGES), stages
 
 
 def test_server_time_is_tracked_separately_from_the_round_trip():
@@ -711,10 +742,10 @@ def test_query_client_always_uses_grpc():
 
 
 def test_latency_components_include_the_server_split():
-    from src.metrics import LATENCY_COMPONENTS
 
     assert "t_qdrant_server_ms" in LATENCY_COMPONENTS
     assert "t_qdrant_overhead_ms" in LATENCY_COMPONENTS
+    assert {f"t_embed_{stage}_ms" for stage in EMBED_STAGES} <= set(LATENCY_COMPONENTS)
 
 
 def test_timers_record_time_even_on_exception():
@@ -767,14 +798,14 @@ def test_truncated_final_line_is_survivable(tmp_path):
     assert path.read_text().strip() == good
 
 
-def test_raw_record_json_carries_all_three_timers():
+def test_raw_record_json_carries_every_timer():
     payload = json.loads(
         RawRecord(
             query_id="q", arm="dense", dataset="nfcorpus", depth=100, run_idx=0,
-            retrieved=[("d1", 1.0)], timers=QueryTimers(t_embed_ms=1.0, t_qdrant_ms=2.0),
+            retrieved=[("d1", 1.0)], timers=QueryTimers(t_embed_dense_ms=1.0, t_qdrant_ms=2.0),
         ).to_json()
     )
-    assert {"t_embed_ms", "t_qdrant_ms", "t_rerank_ms", "t_total_ms"} <= payload.keys()
+    assert set(LATENCY_COMPONENTS) <= payload.keys()
     assert payload["retrieved"] == [["d1", 1.0]]
     assert payload["depth"] == 100
 

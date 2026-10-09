@@ -1,9 +1,12 @@
-"""Three independent timers per query.
+"""Per-query timers.
 
 The split between client-side and server-side time is the central finding of the
-project, so the three components are accumulated separately and never summed before
-storage. `t_qdrant_ms` is the sum of all Qdrant round trips an arm makes, issued
-serially.
+project, so each component is accumulated separately and never summed before storage.
+
+Query embedding is bucketed per encoder (`dense`, `colbert`, `muvera`) so the encoders
+can be compared directly rather than only inferred from arm-vs-arm differences;
+`t_embed_ms` is their sum. `t_qdrant_ms` is the sum of all Qdrant round trips an arm
+makes, issued serially.
 
 `t_qdrant_server_ms` is Qdrant's OWN reported processing time, summed over the same
 calls, read from the gRPC response. It matters because a large share of the
@@ -19,44 +22,50 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
 
+# One bucket per query encoder. `muvera` is the FDE transform applied to the ColBERT
+# token vectors, not a model call of its own, so an arm that uses it always pays
+# `colbert` as well.
+EMBED_STAGES = ("dense", "colbert", "muvera")
+
 
 @dataclass
 class QueryTimers:
-    t_embed_ms: float = 0.0
+    t_embed_dense_ms: float = 0.0
+    t_embed_colbert_ms: float = 0.0
+    t_embed_muvera_ms: float = 0.0
     t_qdrant_ms: float = 0.0
     t_rerank_ms: float = 0.0
     # Qdrant's self-reported server-side time, accumulated across this query's calls.
     t_qdrant_server_ms: float | None = None
 
     @contextmanager
-    def embed(self) -> Iterator[None]:
+    def _accumulate(self, attr: str) -> Iterator[None]:
         start = time.perf_counter()
         try:
             yield
         finally:
-            self.t_embed_ms += (time.perf_counter() - start) * 1000.0
+            setattr(self, attr, getattr(self, attr) + (time.perf_counter() - start) * 1000.0)
 
-    @contextmanager
-    def qdrant(self) -> Iterator[None]:
-        start = time.perf_counter()
-        try:
-            yield
-        finally:
-            self.t_qdrant_ms += (time.perf_counter() - start) * 1000.0
+    def embed(self, stage: str):
+        if stage not in EMBED_STAGES:
+            raise ValueError(f"unknown embed stage {stage!r}; expected one of {EMBED_STAGES}")
+        return self._accumulate(f"t_embed_{stage}_ms")
 
-    @contextmanager
-    def rerank(self) -> Iterator[None]:
-        start = time.perf_counter()
-        try:
-            yield
-        finally:
-            self.t_rerank_ms += (time.perf_counter() - start) * 1000.0
+    def qdrant(self):
+        return self._accumulate("t_qdrant_ms")
+
+    def rerank(self):
+        return self._accumulate("t_rerank_ms")
 
     def add_server_time(self, seconds: float | None) -> None:
         """Accumulate Qdrant's reported time for one call, in milliseconds."""
         if seconds is None:
             return
         self.t_qdrant_server_ms = (self.t_qdrant_server_ms or 0.0) + seconds * 1000.0
+
+    @property
+    def t_embed_ms(self) -> float:
+        return self.t_embed_dense_ms + self.t_embed_colbert_ms + self.t_embed_muvera_ms
 
     @property
     def t_total_ms(self) -> float:
@@ -70,15 +79,17 @@ class QueryTimers:
         return self.t_qdrant_ms - self.t_qdrant_server_ms
 
     def as_dict(self) -> dict:
+        def opt(value: float | None) -> float | None:
+            return None if value is None else round(value, 4)
+
         return {
             "t_embed_ms": round(self.t_embed_ms, 4),
+            "t_embed_dense_ms": round(self.t_embed_dense_ms, 4),
+            "t_embed_colbert_ms": round(self.t_embed_colbert_ms, 4),
+            "t_embed_muvera_ms": round(self.t_embed_muvera_ms, 4),
             "t_qdrant_ms": round(self.t_qdrant_ms, 4),
             "t_rerank_ms": round(self.t_rerank_ms, 4),
             "t_total_ms": round(self.t_total_ms, 4),
-            "t_qdrant_server_ms": (
-                None if self.t_qdrant_server_ms is None else round(self.t_qdrant_server_ms, 4)
-            ),
-            "t_qdrant_overhead_ms": (
-                None if self.t_qdrant_overhead_ms is None else round(self.t_qdrant_overhead_ms, 4)
-            ),
+            "t_qdrant_server_ms": opt(self.t_qdrant_server_ms),
+            "t_qdrant_overhead_ms": opt(self.t_qdrant_overhead_ms),
         }
