@@ -35,7 +35,7 @@ def test_gate1_dense_matches_published_ndcg(cfg, nfcorpus, encoders, nfcorpus_co
     ref = cfg.models.dense.reference
     assert ref.dataset == "nfcorpus", "Gate 1 is defined against nfcorpus"
 
-    client = build_client(cfg)
+    client = build_client(cfg, for_queries=True)
     ctx = ArmContext(
         client=client,
         cfg=cfg,

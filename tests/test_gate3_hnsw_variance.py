@@ -20,7 +20,7 @@ N_QUERIES = 100
 
 
 def _score_dense(cfg, bundle, encoders, collection: str) -> float:
-    client = build_client(cfg)
+    client = build_client(cfg, for_queries=True)
     ctx = ArmContext(
         client=client,
         cfg=cfg,

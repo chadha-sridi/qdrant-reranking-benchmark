@@ -33,10 +33,8 @@ build-backend = "hatchling.build"
 packages = ["src"]
 
 [tool.pytest.ini_options]
-# So bare `pytest` can import the `src` package without needing `python -m pytest` or
-# a manually-set PYTHONPATH (codex review: plain pytest failed import collection).
-# Renaming the package itself was declined as disproportionate to the problem — it
-# would touch every import, the CLI entry point, and every doc path for a one-line fix.
+# Lets bare `pytest` import the `src` package without `python -m pytest` or a
+# manually-set PYTHONPATH.
 pythonpath = ["."]
 testpaths = ["tests"]
 markers = [

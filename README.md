@@ -654,7 +654,7 @@ Pre-run correctness checks, not part of a run. Each guards one assumption that, 
 broken, would make every downstream number wrong while still looking plausible. Run them
 once before trusting results, and again after changing models, datasets, or indexing.
 They are ordinary pytest tests marked `gate` and `slow`, so they need Docker, the models,
-and a live Qdrant. 
+and a live Qdrant.
 
 | Gate | Checks | Status |
 |---|---|---|
@@ -685,8 +685,11 @@ Run the test suite:
 
 ```bash
 pytest -m "not slow"      # unit tests — no Docker, no model downloads, seconds
-pytest -m gate             # validation gates — needs the live stack
+pytest -m gate            # validation gates — needs the live stack, ~18 min
 ```
+
+The gates share one NFCorpus collection across the session and reuse cached embeddings,
+so the first run pays the index build and later ones do not.
 
 ---
 
