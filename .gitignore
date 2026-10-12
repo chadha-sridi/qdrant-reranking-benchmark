@@ -17,3 +17,6 @@ results/queries/
 
 # Disposable smoke-test output (scripts/smoke.py) — same category as results/raw above.
 results_smoke/
+
+# Archived runs kept for reference, not for publication.
+results_archive/

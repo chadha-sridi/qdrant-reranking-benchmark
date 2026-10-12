@@ -49,6 +49,22 @@ Silicon Mac gets a native arm64 container, an x86 Linux box gets native amd64, n
 is emulated. Latency numbers are only meaningful for the machine that produced them;
 `results/manifest.json` records which one that was.
 
+On macOS, Docker runs inside a VM sized independently of the Mac, and that VM — not the
+Mac — is what Qdrant gets. Colima's default is 2 CPUs and 2 GiB, which starves the
+server side while the client (embedding, the cross-encoder) has the whole machine. Size
+the VM so each dataset's collection stays resident; this repo's results use 8 CPUs and
+10 GiB on a 10-core, 16 GB M4:
+
+```bash
+colima stop && colima start --cpu 8 --memory 10
+```
+
+The VM's CPUs are not reserved: queries run one at a time, so an idle Qdrant leaves those
+cores to the client. The manifest records the VM's CPUs and memory under
+`qdrant.server_resources`, and `run` refuses a collection whose working set exceeds 80%
+of that memory, since the arms reading the large vectors (ColBERT, MUVERA) would then be
+measured on disk while `dense` would not.
+
 Qdrant's storage is a **Docker named volume**, not a host bind mount. This is a
 measurement requirement, not a preference: a bind mount from macOS reaches the container
 through the VM's virtiofs passthrough, where Qdrant reports `Filesystem check failed …
@@ -68,7 +84,7 @@ must match the `name:` under `volumes:` in `docker-compose.yml`.
 # 1. Install dependencies
 pip install -e ".[dev]"          # or: uv sync
 
-# 2. Start Qdrant (pinned to v1.19.0)
+# 2. Start Qdrant (pinned to v1.19.0). On macOS, size the Docker VM first (see above).
 docker compose up -d
 
 # 3. Sanity-check the environment
@@ -567,6 +583,7 @@ are never pooled across datasets, so there is nothing for a separate run to bias
 | `--dense-model` | config | override the baseline dense model every arm reranks |
 | `--dense-model-dim` | auto | dimension of `--dense-model`, if FastEmbed's registry can't resolve it |
 | `--analyse` / `--no-analyse` | on | aggregate after the run completes |
+| `--allow-disk-bound` | off | run even when a collection's working set exceeds 80% of Qdrant's memory; its large-vector arms are then measured on disk |
 | `--allow-partial` | off | aggregate even if some `(arm, depth)` units have incomplete records — for inspecting an interrupted run, never for a result you intend to trust |
 
 `aggregate` accepts the same `--allow-partial` flag.
@@ -630,6 +647,10 @@ details, and each changes what a number means.
 - **Latency is unloaded serial latency.** One client, one query in flight, no
   pipelining — a lower bound on real-world latency, not a capacity measurement.
   Throughput under load is out of scope.
+- **Client and server share one machine.** Qdrant runs in the Docker VM and the client
+  on the host, so the client/server split compares two processes on the same hardware,
+  not two machines. Every collection fits in the server's memory, so no arm is
+  measured on disk.
 - **Memory and latency describe the same collection, but memory is not additive per
   arm.** Both come from the one collection per dataset, so they describe a single
   deployment. But several arms share a vector (`colbert_rescore` and `cross_encoder`

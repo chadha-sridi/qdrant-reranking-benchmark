@@ -57,7 +57,11 @@ def _qdrant_version(url: str) -> str | None:
 
 
 def base_manifest(
-    cfg: Config, *, image_digest: str | None = None, launcher: str | None = None
+    cfg: Config,
+    *,
+    image_digest: str | None = None,
+    launcher: str | None = None,
+    server_resources: dict | None = None,
 ) -> dict[str, Any]:
     info = current_platform()
     return {
@@ -73,6 +77,8 @@ def base_manifest(
             "image": cfg.run.qdrant.image,
             "image_digest": image_digest,
             "container_launcher": launcher,
+            # What Qdrant itself had, which on macOS is the Docker VM, not the host above.
+            "server_resources": server_resources,
             "reported_version": _qdrant_version(cfg.run.qdrant.url),
             "hnsw": cfg.run.qdrant.hnsw.model_dump(),
             "prefer_grpc": cfg.run.qdrant.prefer_grpc,

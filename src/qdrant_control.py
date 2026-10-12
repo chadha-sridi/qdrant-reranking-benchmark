@@ -151,6 +151,24 @@ class QdrantController:
             time.sleep(1.0)
         raise QdrantControlError(f"Qdrant not ready within {timeout_s}s: {last}")
 
+    def server_resources(self) -> dict | None:
+        """CPUs and memory available to the Docker host Qdrant runs on.
+
+        On macOS that host is a VM (colima, Docker Desktop) sized independently of the
+        machine, so the host's own CPU and RAM say nothing about what Qdrant had.
+        """
+        out = subprocess.run(
+            ["docker", "info", "--format", "{{.NCPU}} {{.MemTotal}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        try:
+            cpus, memory_bytes = (int(v) for v in out.stdout.split())
+        except ValueError:
+            return None
+        return {"cpus": cpus, "memory_bytes": memory_bytes}
+
     def image_digest(self) -> str | None:
         out = subprocess.run(
             ["docker", "image", "inspect", self.cfg.run.qdrant.image, "--format", "{{index .RepoDigests 0}}"],

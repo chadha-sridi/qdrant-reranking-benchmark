@@ -910,3 +910,41 @@ def test_significance_p_values_are_actually_extracted():
 def test_kendall_tau_b_detects_a_reversal():
     a = [f"d{i}" for i in range(10)]
     assert kendall_tau_b(a, list(reversed(a))) == pytest.approx(-1.0)
+
+
+# ------------------------------------------------------------------ server memory fit
+
+
+def _collection_with_working_set(gib: float):
+    from src.memory import CollectionMemory, Component
+
+    return CollectionMemory(
+        dataset="fiqa",
+        collection="fiqa",
+        n_documents=1,
+        n_token_vectors=None,
+        total=Component(expected_cache_bytes=int(gib * 1024**3)),
+    )
+
+
+def test_collection_that_fits_in_server_memory_passes():
+    from src.memory import check_fits_in_memory
+
+    check_fits_in_memory(_collection_with_working_set(6.4), server_memory_bytes=10 * 1024**3)
+
+
+def test_collection_larger_than_server_memory_is_refused():
+    """FiQA's 6.4 GiB working set in a 1.9 GiB VM made the large-vector arms disk-bound."""
+    from src.memory import MemoryReadError, check_fits_in_memory
+
+    with pytest.raises(MemoryReadError, match="disk-bound"):
+        check_fits_in_memory(_collection_with_working_set(6.4), server_memory_bytes=int(1.9 * 1024**3))
+
+
+def test_fit_check_leaves_headroom_for_qdrant_itself():
+    from src.memory import MAX_WORKING_SET_FRACTION, MemoryReadError, check_fits_in_memory
+
+    server = 10 * 1024**3
+    just_over = server * MAX_WORKING_SET_FRACTION / 1024**3 + 0.01
+    with pytest.raises(MemoryReadError):
+        check_fits_in_memory(_collection_with_working_set(just_over), server_memory_bytes=server)

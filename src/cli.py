@@ -13,7 +13,12 @@ from .datasets import load_dataset_bundle
 from .embedding import build_encoders
 from .indexing import build_collection, token_vector_count
 from .manifest import base_manifest, merge, record_dataset
-from .memory import read_collection_memory, verify_expected_vectors, write_memory_record
+from .memory import (
+    check_fits_in_memory,
+    read_collection_memory,
+    verify_expected_vectors,
+    write_memory_record,
+)
 from .qdrant_control import QdrantController
 from .runner import run_dataset
 
@@ -73,6 +78,10 @@ def run(
         bool,
         typer.Option(help="Aggregate even if some (arm, depth) units end up with incomplete records. Never use this for a result you intend to trust."),
     ] = False,
+    allow_disk_bound: Annotated[
+        bool,
+        typer.Option(help="Run even when a collection's working set does not fit in Qdrant's memory. Its latency is then disk-bound for the large-vector arms only."),
+    ] = False,
 ) -> None:
     """Index, measure memory, execute the interleaved plan, and aggregate."""
     cfg = load_config()
@@ -126,10 +135,25 @@ def run(
 
     controller = QdrantController(cfg)
     controller.up()
+    server_resources = controller.server_resources()
+    if server_resources is None:
+        raise typer.BadParameter(
+            "could not read the Docker host's CPU and memory from `docker info`; the run "
+            "would not record what Qdrant ran on."
+        )
+    _echo(
+        f"qdrant server: {server_resources['cpus']} CPUs, "
+        f"{_human(server_resources['memory_bytes'])} memory"
+    )
     manifest_path = cfg.paths["manifest"]
     merge(
         manifest_path,
-        base_manifest(cfg, image_digest=controller.image_digest(), launcher=controller._launcher),
+        base_manifest(
+            cfg,
+            image_digest=controller.image_digest(),
+            launcher=controller._launcher,
+            server_resources=server_resources,
+        ),
     )
 
     encoders = build_encoders(cfg)
@@ -187,6 +211,8 @@ def run(
                 n_token_vectors=token_vector_count(cfg, bundle),
             )
             verify_expected_vectors(memory, bundle.spec.representations)
+            if not allow_disk_bound:
+                check_fits_in_memory(memory, server_resources["memory_bytes"])
             memory_record = memory.as_dict()
             write_memory_record(cfg.paths["agg"] / f"{name}__memory.json", memory)
             for vector_name, vec in sorted(memory.vectors.items()):
@@ -385,6 +411,15 @@ def doctor() -> None:
     try:
         controller.wait_ready(timeout_s=5)
         _echo(f"qdrant            : ready at {cfg.run.qdrant.url}")
+        resources = controller.server_resources()
+        _echo(
+            "qdrant server     : "
+            + (
+                f"{resources['cpus']} CPUs, {_human(resources['memory_bytes'])} memory"
+                if resources
+                else "unknown (docker info failed)"
+            )
+        )
     except Exception as exc:
         _echo(f"qdrant            : NOT ready ({exc}). Run: docker compose up -d")
 

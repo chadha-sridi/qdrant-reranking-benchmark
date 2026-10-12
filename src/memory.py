@@ -215,6 +215,32 @@ def verify_expected_vectors(memory: CollectionMemory, expected: Sequence[str]) -
         )
 
 
+# Share of the Qdrant host's memory a collection's working set may occupy. The rest is
+# for Qdrant's own process, the VM's OS, and page-cache churn during queries.
+MAX_WORKING_SET_FRACTION = 0.8
+
+
+def check_fits_in_memory(memory: CollectionMemory, server_memory_bytes: int) -> None:
+    """Fail when the collection cannot stay resident on the server.
+
+    A working set larger than the server's memory is read from disk on every query, so
+    the arms that touch the large vectors (ColBERT, MUVERA) would be measured on disk
+    rather than on Qdrant, while `dense` and the cross-encoder's dense search, whose
+    vectors are small, would not. That is a bias between arms, not just a slower run.
+    """
+    budget = int(server_memory_bytes * MAX_WORKING_SET_FRACTION)
+    needed = memory.total.working_set_bytes
+    if needed > budget:
+        gib = 1024**3
+        raise MemoryReadError(
+            f"{memory.collection}: working set {needed / gib:.1f} GiB exceeds "
+            f"{MAX_WORKING_SET_FRACTION:.0%} of Qdrant's {server_memory_bytes / gib:.1f} GiB, "
+            "so the large-vector arms would be disk-bound. Give the Docker VM more memory "
+            "(e.g. `colima stop && colima start --cpu 8 --memory 10`), or pass "
+            "--allow-disk-bound to measure it anyway."
+        )
+
+
 def write_memory_record(path: Path, memory: CollectionMemory) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(memory.as_dict(), indent=2, sort_keys=True))
