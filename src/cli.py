@@ -16,7 +16,7 @@ from .manifest import base_manifest, merge, record_dataset
 from .memory import (
     check_fits_in_memory,
     read_collection_memory,
-    verify_expected_vectors,
+    verify_expected_representations,
     write_memory_record,
 )
 from .qdrant_control import QdrantController
@@ -217,11 +217,11 @@ def run(
                 n_documents=len(bundle.documents),
                 n_token_vectors=token_vector_count(cfg, bundle),
             )
-            verify_expected_vectors(memory, bundle.spec.representations)
+            verify_expected_representations(cfg, memory, bundle.spec.representations)
             if not allow_disk_bound:
                 check_fits_in_memory(memory, server_resources["memory_bytes"])
             memory_record = memory.as_dict()
-            write_memory_record(cfg.paths["agg"] / f"{name}__memory.json", memory)
+            write_memory_record(cfg, cfg.paths["agg"] / f"{name}__memory.json", memory)
             for vector_name, vec in sorted(memory.vectors.items()):
                 _echo(
                     f"    {vector_name:8s} disk={_human(vec.total.disk_bytes)} "
@@ -257,12 +257,6 @@ def run(
                 "plan_digest": summary.plan_digest,
                 "units": summary.units,
                 "collection_queried": collection,
-                # BM25's length normalisation constant, measured from this corpus.
-                "bm25_avg_len": (
-                    encoders.bm25_avg_len(bundle.texts)
-                    if "bm25" in spec.representations
-                    else None
-                ),
                 "shard_number": 1,
                 # Without the pinned revisions a later rerun can silently retrieve a
                 # different corpus, queries, or qrels from the same repo name.
@@ -333,8 +327,8 @@ def memory(
         n_documents=len(bundle.documents),
         n_token_vectors=token_vector_count(cfg, bundle),
     )
-    verify_expected_vectors(memory_read, bundle.spec.representations)
-    write_memory_record(cfg.paths["agg"] / f"{dataset}__memory.json", memory_read)
+    verify_expected_representations(cfg, memory_read, bundle.spec.representations)
+    write_memory_record(cfg, cfg.paths["agg"] / f"{dataset}__memory.json", memory_read)
     _echo(json.dumps(memory_read.as_dict(), indent=2, sort_keys=True))
 
 

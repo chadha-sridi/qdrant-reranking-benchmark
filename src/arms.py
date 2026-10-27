@@ -131,18 +131,27 @@ FIRST_STAGES = ("dense", "bm25")
 
 
 def first_stage_query(ctx: ArmContext, timers: QueryTimers, first_stage: str, query: str):
-    """Embed `query` for a first stage, timed into that stage's own embed bucket.
+    """The (query, using) pair Qdrant searches a first stage with.
 
-    Returns what Qdrant searches the `first_stage` named vector with: a dense vector
-    for `dense`, a sparse vector for `bm25`. Both are identical to what that stage's
-    baseline arm sends, so an arm's difference from its baseline is its reranking alone.
+    `dense` embeds the query client-side, timed into its own embed bucket, and searches
+    the `dense` vector. `bm25` sends the raw query text to the BM25-scored full-text
+    index on the document-text payload field; Qdrant tokenizes it server-side, so there
+    is nothing to time client-side. Either way the pair is identical to what that
+    stage's baseline arm sends, so an arm's difference from its baseline is its
+    reranking alone.
     """
     if first_stage == "dense":
         with timers.embed("dense"):
-            return ctx.encoders.embed_query_dense(query).tolist()
+            return ctx.encoders.embed_query_dense(query).tolist(), "dense"
     if first_stage == "bm25":
-        with timers.embed("bm25"):
-            return ctx.encoders.embed_query_bm25(query)
+        bm25 = ctx.cfg.models.bm25
+        text_query = models.TextQuery(
+            text=models.TextQueryInput(
+                query=query,
+                scoring=models.Bm25Scoring(bm25=models.Bm25Params(k=bm25.k, b=bm25.b)),
+            )
+        )
+        return text_query, bm25.field
     raise ArmError(f"unknown first stage {first_stage!r}; expected one of {FIRST_STAGES}")
 
 
@@ -200,15 +209,20 @@ def _query_message(
     a silently dropped search parameter.
 
     A bare vector has to be wrapped in `NearestQuery` before conversion — the converter
-    rejects a raw list. `Prefetch` resolves its own inner query, so it needs no wrapping.
+    rejects a raw list. A `TextQuery` (BM25) is already a complete query, and `Prefetch`
+    resolves its own inner query, so neither needs wrapping.
     """
+    if isinstance(query, models.TextQuery):
+        top_query = query
+    else:
+        top_query = models.NearestQuery(nearest=query)
     prefetches = None
     if prefetch is not None:
         listed = prefetch if isinstance(prefetch, (list, tuple)) else [prefetch]
         prefetches = [RestToGrpc.convert_prefetch_query(p) for p in listed]
     return qgrpc.QueryPoints(
         collection_name=ctx.collection,
-        query=RestToGrpc.convert_query(models.NearestQuery(nearest=query)),
+        query=RestToGrpc.convert_query(top_query),
         prefetch=prefetches,
         using=using,
         limit=limit,
@@ -249,12 +263,12 @@ def _first_stage_search(ctx: ArmContext, query: str, depth: int | None, *, first
     """A first stage on its own, with no reranking: the baseline for its family."""
     timers = QueryTimers()
     limit = _final_limit(ctx, depth)
-    first_stage_vec = first_stage_query(ctx, timers, first_stage, query)
+    first_stage_vec, using = first_stage_query(ctx, timers, first_stage, query)
     retrieved = run_query(
         ctx,
         timers,
         query=first_stage_vec,
-        using=first_stage,
+        using=using,
         limit=limit,
         with_payload=["doc_id"],
     )
@@ -269,8 +283,8 @@ def dense_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
 
 @register("bm25", sweeps_depth=False, requires=["bm25"], group="baseline", baseline="bm25")
 def bm25_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
-    """Sparse baseline: a single BM25 search over Qdrant's inverted index, IDF applied
-    server-side, no reranking stage."""
+    """Sparse baseline: a single BM25 search, scored by Qdrant on the full-text index
+    over the document text, no reranking stage."""
     return _first_stage_search(ctx, query, depth, first_stage="bm25")
 
 
@@ -289,19 +303,19 @@ def _late_interaction_rescore(ctx: ArmContext, query: str, depth: int | None, *,
     limit = _final_limit(ctx, depth)
     _guard_prefetch(depth, limit)
 
-    first_stage_vec = first_stage_query(ctx, timers, first_stage, query)
+    first_stage_vec, using = first_stage_query(ctx, timers, first_stage, query)
     with timers.embed("late_interaction"):
         late_interaction_tokens_list = ctx.encoders.embed_query_late_interaction(query).tolist()
     retrieved = run_query(
         ctx,
         timers,
-        prefetch=[models.Prefetch(query=first_stage_vec, using=first_stage, limit=depth)],
+        prefetch=[models.Prefetch(query=first_stage_vec, using=using, limit=depth)],
         query=late_interaction_tokens_list,
         using="late_interaction",
         limit=limit,
         with_payload=["doc_id"],
     )
-    pool = _pool_doc_ids(ctx, query=first_stage_vec, using=first_stage, depth=depth)
+    pool = _pool_doc_ids(ctx, query=first_stage_vec, using=using, depth=depth)
     return ArmOutput(retrieved, timers, pool_doc_ids=pool)
 
 
@@ -378,9 +392,9 @@ def _cross_encoder(ctx: ArmContext, query: str, depth: int | None, *, first_stag
     timers = QueryTimers()
     limit = _final_limit(ctx, depth)
     _guard_prefetch(depth, limit)
-    first_stage_vec = first_stage_query(ctx, timers, first_stage, query)
+    first_stage_vec, using = first_stage_query(ctx, timers, first_stage, query)
     candidates = run_query(
-        ctx, timers, map_ids=False, query=first_stage_vec, using=first_stage,
+        ctx, timers, map_ids=False, query=first_stage_vec, using=using,
         limit=depth, with_payload=["doc_id", "text"],
     )
 

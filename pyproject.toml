@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     # Pinned to the server minor version: the client warns and may misbehave when the
     # minor versions diverge. Bump this together with the image tag in docker-compose.yml.
-    "qdrant-client>=1.19.0,<1.20",
+    "qdrant-client>=1.20.0,<1.21",
     "fastembed>=0.7.2,<0.8",  # 0.7.2 introduced postprocess.Muvera
     "ranx>=0.3.20,<0.4",
     "datasets>=3.0.0,<4",

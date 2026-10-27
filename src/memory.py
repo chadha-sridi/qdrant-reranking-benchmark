@@ -1,8 +1,9 @@
 """Per-representation memory, read from Qdrant's own accounting.
 
 Qdrant 1.18+ reports memory for a collection at `GET /collections/{name}/memory`,
-broken down per named vector into `storage` / `index`, with `payload`,
-`payload_index` and the id tracker reported separately.
+broken down per named vector into `storage` / `index`, with `payload`, each payload
+index (by field name) and the id tracker reported separately. BM25 is a full-text
+payload index rather than a vector, so its cost is read from that index's entry.
 
 Caveat to carry into any writeup: these are Qdrant's own estimates. Its docs put
 `ram_bytes` 10-15% low, because allocations inside third-party libraries are not
@@ -101,7 +102,7 @@ class CollectionMemory:
     n_token_vectors: int | None
     vectors: dict[str, VectorMemory] = field(default_factory=dict)
     payload: Component = Component()
-    payload_index: Component = Component()
+    payload_indexes: dict[str, Component] = field(default_factory=dict)
     id_tracker: Component = Component()
     total: Component = Component()
     qdrant_version: str | None = None
@@ -115,7 +116,7 @@ class CollectionMemory:
             "qdrant_version": self.qdrant_version,
             "vectors": {name: vec.as_dict() for name, vec in self.vectors.items()},
             "payload": self.payload.as_dict(),
-            "payload_index": self.payload_index.as_dict(),
+            "payload_indexes": {name: c.as_dict() for name, c in self.payload_indexes.items()},
             "id_tracker": self.id_tracker.as_dict(),
             "total": self.total.as_dict(),
             "source": "qdrant /collections/{name}/memory",
@@ -176,15 +177,13 @@ def read_collection_memory(
         )
 
     other = result.get("other") or {}
-    payload_index_entries = result.get("payload_index") or []
-    payload_index = Component(
-        disk_bytes=sum(int((e.get("disk_bytes") or 0)) for e in payload_index_entries),
-        ram_bytes=sum(int((e.get("ram_bytes") or 0)) for e in payload_index_entries),
-        cached_bytes=sum(int((e.get("cached_bytes") or 0)) for e in payload_index_entries),
-        expected_cache_bytes=sum(
-            int((e.get("expected_cache_bytes") or 0)) for e in payload_index_entries
-        ),
-    )
+    payload_indexes: dict[str, Component] = {}
+    for entry in result.get("payload_index") or []:
+        # Each entry is {"name": field, "usage": {...}}. A missing `usage` means the
+        # response format changed; reading it as zero would understate memory silently.
+        if "name" not in entry or "usage" not in entry:
+            raise MemoryReadError(f"unexpected payload_index entry from {collection}: {entry}")
+        payload_indexes[entry["name"]] = Component.parse(entry["usage"])
 
     return CollectionMemory(
         dataset=dataset,
@@ -193,25 +192,41 @@ def read_collection_memory(
         n_token_vectors=n_token_vectors,
         vectors=vectors,
         payload=Component.parse(result.get("payload")),
-        payload_index=payload_index,
+        payload_indexes=payload_indexes,
         id_tracker=Component.parse(other.get("id_tracker")),
         total=Component.parse(result.get("total")),
         qdrant_version=cfg.run.qdrant.image.rpartition(":")[2] or None,
     )
 
 
-def verify_expected_vectors(memory: CollectionMemory, expected: Sequence[str]) -> None:
+def representation_memory(cfg: Config, memory: CollectionMemory) -> dict[str, dict]:
+    """Memory per representation, keyed by the name arms declare in `requires`.
+
+    Named vectors map one to one. `bm25` maps to the full-text index on its payload
+    field: the index is BM25's whole cost, since the text payload it indexes is stored
+    for the cross-encoder arms regardless.
+    """
+    out = {name: vec.as_dict() for name, vec in memory.vectors.items()}
+    bm25_index = memory.payload_indexes.get(cfg.models.bm25.field)
+    if bm25_index is not None:
+        out["bm25"] = {"name": "bm25", "index": bm25_index.as_dict(), "total": bm25_index.as_dict()}
+    return out
+
+
+def verify_expected_representations(
+    cfg: Config, memory: CollectionMemory, expected: Sequence[str]
+) -> None:
     """Every representation the dataset indexes must appear in the accounting.
 
-    A missing vector means either the upload never wrote it or the name drifted, both of
+    A missing one means either the upload never wrote it or the name drifted, both of
     which would silently leave that representation out of the memory table.
     """
-    missing = [name for name in expected if name not in memory.vectors]
+    reported = representation_memory(cfg, memory)
+    missing = [name for name in expected if name not in reported]
     if missing:
         raise MemoryReadError(
             f"{memory.collection}: Qdrant reports no memory for {missing}, but the "
-            f"dataset indexes {list(expected)}. Reported vectors: "
-            f"{sorted(memory.vectors)}."
+            f"dataset indexes {list(expected)}. Reported: {sorted(reported)}."
         )
 
 
@@ -241,6 +256,7 @@ def check_fits_in_memory(memory: CollectionMemory, server_memory_bytes: int) -> 
         )
 
 
-def write_memory_record(path: Path, memory: CollectionMemory) -> None:
+def write_memory_record(cfg: Config, path: Path, memory: CollectionMemory) -> None:
+    record = {**memory.as_dict(), "representations": representation_memory(cfg, memory)}
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(memory.as_dict(), indent=2, sort_keys=True))
+    path.write_text(json.dumps(record, indent=2, sort_keys=True))

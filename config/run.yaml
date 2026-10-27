@@ -45,7 +45,7 @@ qdrant:
   # processing time is only readable off the gRPC response, and that split is the point.
   prefer_grpc: true
   timeout_s: 120
-  image: "qdrant/qdrant:v1.19.0"
+  image: "qdrant/qdrant:v1.20.0"
   container_name: "reranking_benchmark_qdrant"
   # Docker named volume (must match the `name:` in docker-compose.yml), not a host
   # directory. A bind mount from macOS goes through the VM's virtiofs passthrough, which

@@ -2,7 +2,7 @@
 
 `dense` and `bm25` on NFCorpus must each match a published NDCG@10 within the tolerance
 pinned in config/models.yaml. If either does not, something is wrong in qrels parsing,
-ID mapping, document text, the encoder setup, or the metric call, and every number
+ID mapping, document text, the encoder or text-index setup, or the metric call, and every number
 measured against that baseline is invalid. Nothing else matters until this passes.
 
 Run against the FULL 323-query NFCorpus test set, not the subsample: the published figure
@@ -34,23 +34,6 @@ def test_gate1_reference_is_verified(cfg, baseline):
             f"{ref.dataset} with verified: false. Confirm it against {ref.source} and set "
             "verified: true before trusting Gate 1 or publishing anything downstream."
         )
-
-
-def test_gate1_bm25_avg_len_is_the_length_fastembed_normalises_by(encoders):
-    """`bm25_avg_len` counts tokens through FastEmbed's private preprocessing helpers.
-
-    If a FastEmbed upgrade changes them, avg_len silently stops matching the document
-    length BM25 divides by. A document whose length equals avg_len must get exactly the
-    length-neutral weight f*(k+1)/(f+k) for every term.
-    """
-    text = "Vitamin D deficiency and vitamin D supplementation in elderly patients."
-    avg_len = encoders.bm25_avg_len([text])
-    (doc,) = encoders.embed_docs_bm25([text], avg_len=avg_len)
-    k = encoders.models.bm25.k
-    counts = sorted(round(w * k / (k + 1 - w)) for w in doc.values)  # invert f(k+1)/(f+k)
-    assert sum(counts) == avg_len, (counts, avg_len)
-    for weight, f in zip(sorted(doc.values), counts):
-        assert weight == pytest.approx(f * (k + 1) / (f + k))
 
 
 @pytest.mark.parametrize("baseline", BASELINES)

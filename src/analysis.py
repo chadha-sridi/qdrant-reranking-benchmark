@@ -29,16 +29,18 @@ def _arm_metadata() -> dict[str, dict]:
 
 
 def _memory_lookup(cfg: Config, dataset: str) -> dict[str, dict]:
-    """Qdrant's per-vector accounting for this dataset's collection, keyed by vector name.
+    """Qdrant's accounting for this dataset's collection, keyed by representation.
 
-    The record on disk describes the whole collection; the aggregate needs it per named
-    vector, so an arm's row can carry the cost of the vectors that arm actually reads.
+    The record on disk describes the whole collection; the aggregate needs it per
+    representation, so an arm's row can carry the cost of what that arm actually reads.
+    Records from runs before BM25 have only `vectors`, which is the same mapping for
+    every representation they had.
     """
     path = cfg.paths["agg"] / f"{dataset}__memory.json"
     if not path.exists():
         return {}
     memory = json.loads(path.read_text())
-    return dict(memory.get("vectors") or {})
+    return dict(memory.get("representations") or memory.get("vectors") or {})
 
 
 class IncompleteRunError(RuntimeError):

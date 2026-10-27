@@ -31,7 +31,6 @@ class DocumentVectors:
     """Corpus embeddings for one dataset, computed once and reused across passes."""
 
     dense: np.ndarray | None = None
-    bm25: list[models.SparseVector] | None = None
     late_interaction: list[np.ndarray] | None = None
     muvera: np.ndarray | None = None
     n_token_vectors: int | None = None
@@ -79,11 +78,6 @@ def embed_corpus(
             out.timings["dense"] = time.perf_counter() - start
             cache.save_dense(key, cached, {"model": cfg.models.dense.name, "dataset": name})
         out.dense = cached
-
-    if "bm25" in representations:
-        start = time.perf_counter()
-        out.bm25 = encoders.embed_docs_bm25(texts, avg_len=encoders.bm25_avg_len(texts))
-        out.timings["bm25"] = time.perf_counter() - start
 
     if needs_late_interaction:
         key = late_interaction_cache_key(cfg, bundle, cache)
@@ -249,12 +243,26 @@ def vectors_config(
     return dense_cfg
 
 
-def sparse_vectors_config(representations: Sequence[str]) -> dict:
-    """Sparse named-vector config. IDF is applied by Qdrant at query time, over the
-    collection actually searched, which is what FastEmbed's BM25 term weights expect."""
-    if "bm25" not in representations:
-        return {}
-    return {"bm25": models.SparseVectorParams(modifier=models.Modifier.IDF)}
+def bm25_index_params(cfg: Config) -> models.TextIndexParams:
+    """Full-text index with BM25 scoring over the document-text payload field.
+
+    `enable_hnsw=False` keeps the index out of the dense HNSW graph: by default Qdrant
+    adds graph links per indexed payload value for filtered search, which would change
+    the graph every dense arm searches. BM25 scoring doesn't use them.
+    """
+    bm25 = cfg.models.bm25
+    return models.TextIndexParams(
+        type=models.TextIndexType.TEXT,
+        tokenizer=models.TokenizerType(bm25.tokenizer),
+        lowercase=bm25.lowercase,
+        stopwords=models.Language(bm25.stopwords),
+        stemmer=models.SnowballParams(
+            type=models.Snowball.SNOWBALL, language=models.SnowballLanguage(bm25.stemmer)
+        ),
+        scoring=models.TextScoringParams(type=models.TextScoringType.BM25),
+        enable_hnsw=False,
+        on_disk=False,
+    )
 
 
 def create_collection(
@@ -273,9 +281,17 @@ def create_collection(
     client.create_collection(
         collection_name=name,
         vectors_config=dense_cfg or None,
-        sparse_vectors_config=sparse_vectors_config(representations) or None,
         shard_number=shard_number,
     )
+    # Created before the upload, so documents are indexed as they arrive and the
+    # optimizer's final rebuild leaves BM25's corpus statistics complete.
+    if "bm25" in representations:
+        client.create_payload_index(
+            collection_name=name,
+            field_name=cfg.models.bm25.field,
+            field_schema=bm25_index_params(cfg),
+            wait=True,
+        )
 
 
 def estimate_point_floats(
@@ -461,8 +477,6 @@ def _point_from_chunk(
     vector: dict[str, object] = {}
     if "dense" in representations:
         vector["dense"] = chunk_vectors.require("dense")[local_i].tolist()
-    if "bm25" in representations:
-        vector["bm25"] = chunk_vectors.require("bm25")[local_i]
     if "muvera" in representations:
         vector["muvera"] = chunk_vectors.require("muvera")[local_i].tolist()
     if "late_interaction" in representations:
@@ -483,7 +497,6 @@ def _embed_chunk(
     *,
     chunk_start: int,
     chunk_end: int,
-    bm25_avg_len: float | None = None,
 ) -> DocumentVectors:
     """Embed one slice of the corpus, reusing the on-disk cache per representation.
 
@@ -514,12 +527,6 @@ def _embed_chunk(
             cached = encoders.embed_docs_dense(texts)
             cache.save_dense(key, cached, {"model": cfg.models.dense.name, "dataset": name})
         out.dense = cached
-
-    # Not cached: BM25 encodes a 10,000-document chunk in about a second.
-    if "bm25" in representations:
-        if bm25_avg_len is None:
-            raise RuntimeError("bm25 needs the whole corpus's avg_len, not a chunk's")
-        out.bm25 = encoders.embed_docs_bm25(texts, avg_len=bm25_avg_len)
 
     if needs_late_interaction:
         key = _chunk_late_interaction_cache_key(cfg, bundle, cache, chunk_start, chunk_end)
@@ -596,8 +603,6 @@ def ingest_corpus(
 
     start = time.perf_counter()
     _disable_indexing(client, name)
-    # A corpus statistic, so it is measured over every document before chunking.
-    bm25_avg_len = encoders.bm25_avg_len(bundle.texts) if "bm25" in representations else None
 
     for chunk_start, chunk_end in _chunk_bounds(total, chunk_size):
         chunk_ids = list(range(chunk_start, chunk_end))
@@ -607,7 +612,7 @@ def ingest_corpus(
 
         chunk_vectors = _embed_chunk(
             cfg, bundle, encoders, representations, cache,
-            chunk_start=chunk_start, chunk_end=chunk_end, bm25_avg_len=bm25_avg_len,
+            chunk_start=chunk_start, chunk_end=chunk_end,
         )
         batch_size = safe_batch_size(cfg, chunk_vectors, representations, chunk_end - chunk_start)
         for batch in iter_batches(missing, batch_size):
@@ -689,17 +694,17 @@ def _config_matches(
     name: str,
     representations: Sequence[str],
 ) -> bool:
-    """Is an existing collection's vector config the one this run would create?
+    """Is an existing collection's config the one this run would create?
 
-    Only the vector names, sizes, distances, and sparse modifiers are compared — those
-    are what make stored points reusable. A mismatch means the points on disk cannot be
-    resumed into.
+    The vector names, sizes, and distances are compared — those are what make stored
+    points reusable — and, when BM25 is wanted, its full-text index and that index's
+    text processing. A mismatch means the collection cannot be resumed into.
     """
     try:
-        params = client.get_collection(name).config.params
+        info = client.get_collection(name)
     except Exception:
         return False
-    existing = params.vectors or {}
+    existing = info.config.params.vectors or {}
     wanted = vectors_config(cfg, spec, representations)
     if set(existing) != set(wanted):
         return False
@@ -707,14 +712,14 @@ def _config_matches(
         have = existing[vector_name]
         if have.size != want.size or have.distance != want.distance:
             return False
-    existing_sparse = params.sparse_vectors or {}
-    wanted_sparse = sparse_vectors_config(representations)
-    if set(existing_sparse) != set(wanted_sparse):
+    if "bm25" not in representations:
+        return True
+    index = (info.payload_schema or {}).get(cfg.models.bm25.field)
+    if index is None or index.params is None:
         return False
-    return all(
-        existing_sparse[vector_name].modifier == want.modifier
-        for vector_name, want in wanted_sparse.items()
-    )
+    wanted_index = bm25_index_params(cfg).model_dump(exclude_none=True)
+    have_index = index.params.model_dump(exclude_none=True)
+    return all(have_index.get(key) == value for key, value in wanted_index.items())
 
 
 def build_client(cfg: Config, *, for_queries: bool = False) -> QdrantClient:

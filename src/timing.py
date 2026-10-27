@@ -3,10 +3,11 @@
 The split between client-side and server-side time is the central finding of the
 project, so each component is accumulated separately and never summed before storage.
 
-Query embedding is bucketed per encoder (`dense`, `bm25`, `late_interaction`,
-`muvera`) so the encoders can be compared directly rather than only inferred from arm-vs-arm differences;
-`t_embed_ms` is their sum. `t_qdrant_ms` is the sum of all Qdrant round trips an arm
-makes, issued serially.
+Query embedding is bucketed per encoder (`dense`, `late_interaction`, `muvera`) so the
+encoders can be compared directly rather than only inferred from arm-vs-arm
+differences; `t_embed_ms` is their sum. BM25 has no bucket: Qdrant tokenizes the query
+server-side, so its cost is inside `t_qdrant_server_ms`. `t_qdrant_ms` is the sum of
+all Qdrant round trips an arm makes, issued serially.
 
 `t_qdrant_server_ms` is Qdrant's OWN reported processing time, summed over the same
 calls, read from the gRPC response. It matters because a large share of the
@@ -25,13 +26,12 @@ from typing import Iterator
 # One bucket per query encoder. `muvera` is the FDE transform applied to the
 # late-interaction token vectors, not a model call of its own, so an arm that uses it
 # always pays `late_interaction` as well.
-EMBED_STAGES = ("dense", "bm25", "late_interaction", "muvera")
+EMBED_STAGES = ("dense", "late_interaction", "muvera")
 
 
 @dataclass
 class QueryTimers:
     t_embed_dense_ms: float = 0.0
-    t_embed_bm25_ms: float = 0.0
     t_embed_late_interaction_ms: float = 0.0
     t_embed_muvera_ms: float = 0.0
     t_qdrant_ms: float = 0.0
@@ -86,7 +86,6 @@ class QueryTimers:
         return {
             "t_embed_ms": round(self.t_embed_ms, 4),
             "t_embed_dense_ms": round(self.t_embed_dense_ms, 4),
-            "t_embed_bm25_ms": round(self.t_embed_bm25_ms, 4),
             "t_embed_late_interaction_ms": round(self.t_embed_late_interaction_ms, 4),
             "t_embed_muvera_ms": round(self.t_embed_muvera_ms, 4),
             "t_qdrant_ms": round(self.t_qdrant_ms, 4),

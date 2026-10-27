@@ -165,16 +165,21 @@ class DenseModel(_Frozen):
 
 
 class Bm25Model(_Frozen):
-    """FastEmbed's BM25 (`Qdrant/bm25`): term weights client-side, IDF in Qdrant.
+    """BM25 scored by Qdrant on a full-text payload index (Qdrant 1.20+).
 
-    `avg_len` is deliberately not a field: BM25's length normalisation needs the
-    corpus's own mean document length, so it is measured per dataset at index time.
+    Qdrant tokenizes documents and queries with the index's own settings and derives
+    every corpus statistic (document count, IDF, average length) from the indexed data,
+    so nothing is computed client-side.
     """
 
-    name: str
+    # The payload key every point stores its document text under (see indexing._point).
+    field: Literal["text"]
+    tokenizer: Literal["word"]
+    lowercase: bool
+    stemmer: Literal["english"]
+    stopwords: Literal["english"]
     k: float
     b: float
-    language: str
     reference: QualityReference
 
 

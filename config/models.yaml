@@ -33,20 +33,22 @@ dense:
     verified: true
 
 bm25:
-  # The sparse first stage. FastEmbed computes each document's BM25 term weights
-  # (stemming, stopwords, saturation k, length normalisation b) and Qdrant applies IDF
-  # server-side through the sparse vector's `modifier: idf`, so IDF always reflects the
-  # collection actually queried. k and b are FastEmbed's defaults and the textbook
-  # Lucene values. avg_len is measured from each corpus at index time and recorded in
-  # the manifest; FastEmbed's fixed default (256) would mis-normalise document length.
-  name: "Qdrant/bm25"
+  # The sparse first stage: Qdrant's BM25 scoring on a full-text index over the `text`
+  # payload field, which already holds every document's text. Qdrant tokenizes both
+  # documents and queries with these settings and derives IDF and the average document
+  # length from the indexed corpus itself.
+  # English Snowball stemming and English stopwords match standard English BM25 setups;
+  # Qdrant's default (lowercasing only) would be a weaker baseline than published ones.
+  # k and b are the textbook Lucene values, sent with every query.
+  field: text
+  tokenizer: word
+  lowercase: true
+  stemmer: english
+  stopwords: english
   k: 1.2
   b: 0.75
-  language: english
-  # Gate 1 for the sparse baseline. The published figure is BM25 (Elasticsearch) from
-  # the BEIR paper. An offline exact-scoring check of this exact tokenizer, k, b and
-  # measured avg_len gave 0.3275 on all 323 judged queries; the gate re-measures it
-  # through Qdrant.
+  # Gate 1 for the sparse baseline: BM25 (Elasticsearch) from the BEIR paper. `observed`
+  # is filled in from the first Gate 1 run through Qdrant.
   reference:
     dataset: nfcorpus
     metric: "ndcg@10"
@@ -54,7 +56,7 @@ bm25:
     tolerance: 0.02
     source: "BEIR, Thakur et al. 2021 (arXiv:2104.08663), Table 2, BM25 on NFCorpus"
     query_set: "all 323 nfcorpus test queries"
-    observed: 0.3275
+    observed: null
     verified: true
 
 late_interaction:

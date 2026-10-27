@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 import numpy as np
-from qdrant_client import models
 
 from .config import Config, ModelsConfig
 from .muvera import build_muvera
@@ -31,8 +30,6 @@ class Encoders:
     models: ModelsConfig
     muvera_seed: int
     _dense: object | None = field(default=None, repr=False)
-    _bm25: object | None = field(default=None, repr=False)
-    _bm25_docs: object | None = field(default=None, repr=False)
     _late_interaction: object | None = field(default=None, repr=False)
     _cross: object | None = field(default=None, repr=False)
     _muvera: object | None = field(default=None, repr=False)
@@ -44,22 +41,6 @@ class Encoders:
 
             self._dense = TextEmbedding(model_name=self.models.dense.name)
         return self._dense
-
-    @property
-    def bm25(self):
-        """BM25 for queries. A query's term weights are all 1, independent of avg_len."""
-        if self._bm25 is None:
-            self._bm25 = self._build_bm25(avg_len=None)
-        return self._bm25
-
-    def _build_bm25(self, avg_len: float | None):
-        from fastembed import SparseTextEmbedding
-
-        cfg = self.models.bm25
-        extra = {} if avg_len is None else {"avg_len": avg_len}
-        return SparseTextEmbedding(
-            model_name=cfg.name, k=cfg.k, b=cfg.b, language=cfg.language, **extra
-        )
 
     @property
     def late_interaction(self):
@@ -93,12 +74,6 @@ class Encoders:
     def embed_query_dense(self, text: str) -> np.ndarray:
         return np.asarray(next(iter(self.dense.query_embed(text))), dtype=np.float32)
 
-    def embed_query_bm25(self, text: str) -> models.SparseVector:
-        embedding = next(iter(self.bm25.query_embed(text)))
-        return models.SparseVector(
-            indices=embedding.indices.tolist(), values=embedding.values.tolist()
-        )
-
     def embed_query_late_interaction(self, text: str) -> np.ndarray:
         tokens = np.asarray(next(iter(self.late_interaction.query_embed(text))), dtype=np.float32)
         limit = self.models.late_interaction.query_max_tokens
@@ -109,33 +84,6 @@ class Encoders:
     def embed_docs_dense(self, texts: Sequence[str], batch_size: int = 64) -> np.ndarray:
         out = list(self.dense.embed(list(texts), batch_size=batch_size))
         return np.asarray(out, dtype=np.float32)
-
-    def bm25_avg_len(self, texts: Sequence[str]) -> float:
-        """Mean document length in BM25 terms, the corpus statistic BM25 normalises by.
-
-        Counted with the encoder's own preprocessing (punctuation, stopwords, length cap,
-        stemming), so it measures exactly the token count `_term_frequency` divides by.
-        FastEmbed exposes no public call for this, so Gate 1's
-        `test_gate1_bm25_avg_len_is_the_length_fastembed_normalises_by` pins that these
-        private helpers still agree with it.
-        """
-        from fastembed.common.utils import remove_non_alphanumeric
-
-        model = self.bm25.model
-        lengths = [
-            len(model._stem(model.tokenizer.tokenize(remove_non_alphanumeric(text))))
-            for text in texts
-        ]
-        return float(np.mean(lengths)) if lengths else 0.0
-
-    def embed_docs_bm25(self, texts: Sequence[str], *, avg_len: float) -> list[models.SparseVector]:
-        """BM25 term weights per document, normalised by the corpus's measured avg_len."""
-        if self._bm25_docs is None or self._bm25_docs.model.avg_len != avg_len:
-            self._bm25_docs = self._build_bm25(avg_len=avg_len)
-        return [
-            models.SparseVector(indices=e.indices.tolist(), values=e.values.tolist())
-            for e in self._bm25_docs.embed(list(texts))
-        ]
 
     def embed_docs_late_interaction(self, texts: Sequence[str], batch_size: int = 16) -> list[np.ndarray]:
         limit = self.models.late_interaction.doc_max_tokens

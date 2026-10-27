@@ -25,7 +25,6 @@ QUALITY_METRICS = ("ndcg@10", "recall@10")
 LATENCY_COMPONENTS = (
     "t_embed_ms",
     "t_embed_dense_ms",
-    "t_embed_bm25_ms",
     "t_embed_late_interaction_ms",
     "t_embed_muvera_ms",
     "t_qdrant_ms",

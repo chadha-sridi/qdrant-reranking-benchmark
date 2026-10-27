@@ -501,60 +501,122 @@ def test_point_from_chunk_uses_global_index_for_the_document_and_local_index_for
     assert point.vector["dense"] == [7.0]  # chunk_vectors[local_i=2] == arange(5,10)[2] == 7
 
 
-def test_bm25_is_a_sparse_vector_with_idf_applied_by_qdrant():
-    """FastEmbed's BM25 weights carry no IDF; without the modifier the baseline would be
-    plain saturated term frequency, not BM25."""
+def test_bm25_index_scores_with_bm25_and_matches_standard_english_processing():
+    """Qdrant's default text index only lowercases; without stemming and stopwords the
+    baseline would be weaker than published English BM25. It must also stay out of the
+    dense HNSW graph, which every dense arm searches."""
     from qdrant_client import models
 
-    from src.indexing import sparse_vectors_config
+    from src.indexing import bm25_index_params
 
-    config = sparse_vectors_config(["dense", "bm25", "late_interaction"])
-    assert set(config) == {"bm25"}
-    assert config["bm25"].modifier == models.Modifier.IDF
-    assert sparse_vectors_config(["dense", "late_interaction"]) == {}
+    params = bm25_index_params(load_config())
+    assert params.scoring == models.TextScoringParams(type=models.TextScoringType.BM25)
+    assert params.stemmer == models.SnowballParams(
+        type=models.Snowball.SNOWBALL, language=models.SnowballLanguage.ENGLISH
+    )
+    assert params.stopwords == models.Language.ENGLISH
+    assert params.lowercase is True
+    assert params.enable_hnsw is False
 
 
-def test_point_carries_the_bm25_sparse_vector_for_its_own_document():
-    from qdrant_client import models
-
+def test_bm25_indexes_the_payload_key_documents_are_stored_under():
     from src.datasets import Document, IdMap
     from src.indexing import DocumentVectors, _point_from_chunk
 
-    doc_ids = [f"doc{i}" for i in range(4)]
-
     class FakeBundle:
-        documents = [Document(doc_id=d, text=d) for d in doc_ids]
-        id_map = IdMap.build("fake", doc_ids)
+        documents = [Document(doc_id="d0", text="some text")]
+        id_map = IdMap.build("fake", ["d0"])
 
-    sparse = [models.SparseVector(indices=[i], values=[float(i)]) for i in range(2, 4)]
-    point = _point_from_chunk(FakeBundle(), DocumentVectors(bm25=sparse), ["bm25"], 3, 2)
-    assert point.payload["doc_id"] == "doc3"
-    assert point.vector == {"bm25": sparse[1]}
+    point = _point_from_chunk(FakeBundle(), DocumentVectors(), [], 0, 0)
+    assert point.payload[load_config().models.bm25.field] == "some text"
 
 
-def test_collection_without_the_bm25_vector_is_rebuilt_not_resumed():
-    """Resuming into a collection built before BM25 existed would upsert points with a
-    sparse vector the collection has no slot for."""
+def test_collection_without_the_bm25_index_is_rebuilt_not_resumed():
+    """Resuming into a collection with no BM25 index, or one with different text
+    processing, would serve BM25 from the wrong index or none."""
     from types import SimpleNamespace
 
     from qdrant_client import models
 
-    from src.indexing import _config_matches, sparse_vectors_config, vectors_config
+    from src.indexing import _config_matches, bm25_index_params, vectors_config
 
     cfg = load_config()
     spec = cfg.datasets.get("nfcorpus")
     reps = spec.representations
     assert "bm25" in reps
+    field = cfg.models.bm25.field
 
-    def client_with(sparse):
-        params = SimpleNamespace(vectors=vectors_config(cfg, spec, reps), sparse_vectors=sparse)
-        info = SimpleNamespace(config=SimpleNamespace(params=params))
+    def client_with(payload_schema):
+        params = SimpleNamespace(vectors=vectors_config(cfg, spec, reps))
+        info = SimpleNamespace(config=SimpleNamespace(params=params), payload_schema=payload_schema)
         return SimpleNamespace(get_collection=lambda name: info)
 
-    assert _config_matches(client_with(sparse_vectors_config(reps)), cfg, spec, "c", reps)
-    assert not _config_matches(client_with(None), cfg, spec, "c", reps)
-    no_idf = {"bm25": models.SparseVectorParams()}
-    assert not _config_matches(client_with(no_idf), cfg, spec, "c", reps)
+    def index(params):
+        return {field: models.PayloadIndexInfo(data_type=models.PayloadSchemaType.TEXT, params=params, points=1)}
+
+    assert _config_matches(client_with(index(bm25_index_params(cfg))), cfg, spec, "c", reps)
+    assert not _config_matches(client_with({}), cfg, spec, "c", reps)
+    unscored = bm25_index_params(cfg).model_copy(update={"scoring": None})
+    assert not _config_matches(client_with(index(unscored)), cfg, spec, "c", reps)
+    unstemmed = bm25_index_params(cfg).model_copy(update={"stemmer": None})
+    assert not _config_matches(client_with(index(unstemmed)), cfg, spec, "c", reps)
+
+
+def test_bm25_first_stage_is_a_server_side_text_query_with_configured_k_and_b():
+    """BM25 sends raw text, so it must charge nothing to client-side embedding."""
+    from types import SimpleNamespace
+
+    from qdrant_client import models
+
+    from src.arms import _query_message, first_stage_query
+
+    cfg = load_config()
+    timers = QueryTimers()
+    query, using = first_stage_query(SimpleNamespace(cfg=cfg), timers, "bm25", "vitamin d")
+    assert using == cfg.models.bm25.field
+    assert isinstance(query, models.TextQuery)
+    assert query.text.query == "vitamin d"
+    assert query.text.scoring.bm25 == models.Bm25Params(k=cfg.models.bm25.k, b=cfg.models.bm25.b)
+    assert timers.t_embed_ms == 0.0
+
+    message = _query_message(
+        SimpleNamespace(collection="c"), query=query, using=using, limit=5, with_payload=["doc_id"]
+    )
+    assert message.query.text.query == "vitamin d"
+    assert message.using == using
+
+
+def test_payload_index_memory_is_read_per_field_and_mapped_to_bm25():
+    from src.memory import (
+        CollectionMemory,
+        Component,
+        MemoryReadError,
+        representation_memory,
+        verify_expected_representations,
+    )
+
+    cfg = load_config()
+    memory = CollectionMemory(
+        dataset="d", collection="c", n_documents=1, n_token_vectors=None,
+        payload_indexes={cfg.models.bm25.field: Component(disk_bytes=7, ram_bytes=3)},
+    )
+    reported = representation_memory(cfg, memory)
+    assert reported["bm25"]["total"]["disk_bytes"] == 7
+    verify_expected_representations(cfg, memory, ["bm25"])
+    with pytest.raises(MemoryReadError, match="no memory for"):
+        verify_expected_representations(cfg, memory, ["bm25", "dense"])
+
+
+def test_payload_index_entry_without_usage_is_an_error_not_zero(monkeypatch):
+    """Qdrant 1.20 nests each payload index's bytes under `usage`; an entry without it
+    means the format moved again, and reading it as zero would understate memory."""
+    from src import memory as memory_module
+
+    cfg = load_config()
+    result = {"vectors": [], "payload_index": [{"name": "text", "disk_bytes": 5}]}
+    monkeypatch.setattr(memory_module, "_fetch", lambda *a, **k: result)
+    with pytest.raises(memory_module.MemoryReadError, match="unexpected payload_index entry"):
+        memory_module.read_collection_memory(cfg, "c", dataset="d", n_documents=1)
 
 
 def test_first_stage_query_rejects_an_unknown_first_stage():

@@ -84,7 +84,7 @@ must match the `name:` under `volumes:` in `docker-compose.yml`.
 # 1. Install dependencies
 pip install -e ".[dev]"          # or: uv sync
 
-# 2. Start Qdrant (pinned to v1.19.0). On macOS, size the Docker VM first (see above).
+# 2. Start Qdrant (pinned to v1.20.0, the first release with BM25 scoring on a text index). On macOS, size the Docker VM first (see above).
 docker compose up -d
 
 # 3. Sanity-check the environment
@@ -232,7 +232,7 @@ a richer relevance signal.
 | `late_interaction_rescore` | `dense` | ✓ | Dense prefetch → late-interaction `max_sim` |
 | `muvera_late_interaction_rescore` | `dense` | ✓ | MUVERA prefetch → exact `max_sim` (⚠️ see [Known limitations](#known-limitations)) |
 | `cross_encoder` | `dense` | ✓ | Dense prefetch → client-side cross-encoder rerank |
-| `bm25` | itself | | A single BM25 search over Qdrant's sparse inverted index, no reranking stage |
+| `bm25` | itself | | A single BM25 search, scored by Qdrant on a full-text index over the document text, no reranking stage |
 | `bm25_late_interaction_rescore` | `bm25` | ✓ | BM25 prefetch → late-interaction `max_sim` |
 | `bm25_cross_encoder` | `bm25` | ✓ | BM25 prefetch → client-side cross-encoder rerank |
 
@@ -243,13 +243,16 @@ name its arms: `--arms bm25,bm25_late_interaction_rescore,bm25_cross_encoder`.
 `muvera_late_interaction_rescore` has no BM25 counterpart: MUVERA is a first stage of its
 own, so it is measured against `dense`, the other single-vector first stage.
 
-**BM25 is FastEmbed's `Qdrant/bm25` with IDF applied by Qdrant.** FastEmbed computes
-each document's term weights (English stemming and stopwords, `k=1.2`, `b=0.75`) and
-the sparse vector's `modifier: idf` makes Qdrant apply IDF over the collection being
-searched. BM25's length normalisation needs the corpus's mean document length:
-FastEmbed defaults it to a fixed 256, so the benchmark measures it per corpus with the
-encoder's own tokenizer and records it in the manifest as `bm25_avg_len`. Query
-weights are all 1, so queries don't depend on it.
+**BM25 is scored by Qdrant on a full-text index (Qdrant 1.20+).** The `text` payload
+field, which every point already stores for the cross-encoder, carries a full-text
+index with BM25 scoring: word tokenizer, lowercasing, English Snowball stemming and
+English stopwords (Qdrant's default is lowercasing only, a weaker baseline than
+standard English BM25). Queries are `text` queries with `k=1.2`, `b=0.75`. Qdrant
+tokenizes documents and queries itself and derives IDF and the average document length
+from the indexed corpus; with one shard those are exact corpus statistics. Nothing is
+computed client-side, so BM25 has no query-embedding time: its tokenization is inside
+Qdrant's own time. The index sets `enable_hnsw: false`, so it adds no links to the dense
+HNSW graph every dense arm searches.
 
 **The dense model is a runtime parameter, not just a config edit.** Default is
 `BAAI/bge-small-en-v1.5`; override with `--dense-model NAME` (and `--dense-model-dim N`
@@ -328,8 +331,7 @@ PubMed-style abstracts; expect a different figure on short-document corpora.
 | ColBERT | ~2.0h |
 | **Total** | **~3.4h** for all five (Quora alone is ~2.9h; the default set is ~0.5h) |
 
-BM25 is not cached and needs no model: it encodes ~10,000 documents a second, so it is
-re-encoded on every build.
+BM25 needs no embedding: Qdrant builds its index from the stored text during upload.
 
 **Per full run** — querying at `repeats: 1`, all seven arms, every evaluated query. The
 two cross-encoder arms are ~98% of it, each costing what `cross_encoder` alone measured
@@ -384,7 +386,7 @@ dataset with real quality headroom past depth 200.
 
 **One collection per dataset, named after the dataset**, holding every representation
 as a **named vector** on the same points — `dense`, `muvera`, and `late_interaction`, all
-fp32, plus the sparse `bm25`. Every arm queries that one collection, so each arm's prefetch
+fp32, plus a BM25-scored full-text index on the `text` payload. Every arm queries that one collection, so each arm's prefetch
 reads the same HNSW graph, the same payload, and the same page cache; the only thing
 that differs between arms is the strategy under test. One collection per representation
 would make arm-to-arm latency incomparable, which is the benchmark's primary axis.
@@ -445,7 +447,6 @@ only aggregated at analysis time:
 | Field | What it is |
 |---|---|
 | `t_embed_dense_ms` | client-side dense query embedding (`dense`, `late_interaction_rescore`, `cross_encoder`) |
-| `t_embed_bm25_ms` | client-side BM25 query tokenisation (`bm25`, `bm25_late_interaction_rescore`, `bm25_cross_encoder`) |
 | `t_embed_late_interaction_ms` | client-side late-interaction query embedding (the three `*_late_interaction_rescore` arms) |
 | `t_embed_muvera_ms` | the MUVERA FDE transform of the late-interaction query tokens (`muvera_late_interaction_rescore` only) |
 | `t_embed_ms` | sum of the four embedding buckets |
@@ -482,7 +483,8 @@ that cost different things:
 | `storage` | the fp32 vectors themselves |
 | `index` | the HNSW graph for that vector (≈0 for `late_interaction`, which has `m=0` and no graph) |
 | `payload` | `doc_id` + `text`, reported as its own component rather than estimated |
-| `payload_index`, `id_tracker` | the remaining accounted-for structures |
+| `payload_indexes` | one entry per indexed payload field; the `text` entry is BM25's index and is reported as the `bm25` representation |
+| `id_tracker` | the remaining accounted-for structure |
 | `n_token_vectors` | late-interaction token-vector total, since "per million points" is ambiguous by ~100× on a multivector collection |
 
 Each is reported in four dimensions: `disk_bytes`, `ram_bytes` (non-evictable),
@@ -722,7 +724,7 @@ and a live Qdrant.
 
 | Gate | Checks | Status |
 |---|---|---|
-| **1** `test_gate1_baseline` | Each baseline reproduces a published NDCG@10 on NFCorpus over all 323 judged queries: `dense` the model card's figure, `bm25` the BEIR paper's. Also checks that the measured BM25 `avg_len` is the length FastEmbed normalises by. Catches broken qrels parsing, ID mapping, document construction, encoder setup, or metric calls. | ✅ `dense` passes; `bm25` not yet run against Qdrant |
+| **1** `test_gate1_baseline` | Each baseline reproduces a published NDCG@10 on NFCorpus over all 323 judged queries: `dense` the model card's figure, `bm25` the BEIR paper's. Catches broken qrels parsing, ID mapping, document construction, encoder or text-index setup, or metric calls. | ✅ `dense` passes; `bm25` pending its first run on 1.20 |
 | **2** `test_gate2_arms_distinct` | No two arms return identical rankings, and every registered arm either runs or is excluded with a stated reason. Catches an arm silently collapsing into its own prefetch. | ✅ passes |
 | **3** `test_gate3_hnsw_variance` | Two independent index builds of the same vectors agree within 0.005 NDCG@10. Establishes the noise floor below which no arm-to-arm difference is interpretable. | ✅ passes |
 | **4** `test_gate4_unattended` | The pipeline runs end to end on a 5-query, 2-depth subset, resumes idempotently, and aggregates into its artefacts. Catches resume bugs (double-counting) and missing output. | ✅ scoped to a subset |
@@ -739,9 +741,8 @@ is what a quantized encoder predicts; a genuine qrels or ID-mapping fault would 
 far more, which is what keeps the widened tolerance meaningful rather than vacuous.
 
 **On Gate 1 for `bm25`.** The reference is BM25 on NFCorpus from the BEIR paper
-(0.325, Elasticsearch), tolerance 0.02. An offline exact-scoring check of this exact
-setup (FastEmbed tokenizer, `k`, `b`, measured `avg_len`, Qdrant's IDF formula) gives
-0.3275 on all 323 judged queries; the gate re-measures it through Qdrant.
+(0.325, Elasticsearch), tolerance 0.02, measured through Qdrant's BM25 text index over
+all 323 judged queries.
 
 MUVERA's calibration is in place: it uses fastembed's official `Muvera` postprocessor and
 is validated on the full NFCorpus corpus (see

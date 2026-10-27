@@ -4,7 +4,7 @@
 # is real for that machine.
 services:
   qdrant:
-    image: qdrant/qdrant:v1.19.0
+    image: qdrant/qdrant:v1.20.0
     container_name: reranking_benchmark_qdrant
     ports:
       - "6333:6333"
