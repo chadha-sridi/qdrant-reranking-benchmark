@@ -31,7 +31,8 @@ class DocumentVectors:
     """Corpus embeddings for one dataset, computed once and reused across passes."""
 
     dense: np.ndarray | None = None
-    colbert: list[np.ndarray] | None = None
+    bm25: list[models.SparseVector] | None = None
+    late_interaction: list[np.ndarray] | None = None
     muvera: np.ndarray | None = None
     n_token_vectors: int | None = None
     timings: dict[str, float] = field(default_factory=dict)
@@ -61,7 +62,7 @@ def embed_corpus(
     name = bundle.spec.name
     out = DocumentVectors()
 
-    needs_colbert = "colbert" in representations or "muvera" in representations
+    needs_late_interaction = "late_interaction" in representations or "muvera" in representations
     needs_dense = "dense" in representations
 
     if needs_dense:
@@ -79,35 +80,43 @@ def embed_corpus(
             cache.save_dense(key, cached, {"model": cfg.models.dense.name, "dataset": name})
         out.dense = cached
 
-    if needs_colbert:
-        key = colbert_cache_key(cfg, bundle, cache)
-        cached_colbert = cache.load_colbert(key)
-        if cached_colbert is None:
+    if "bm25" in representations:
+        start = time.perf_counter()
+        out.bm25 = encoders.embed_docs_bm25(texts, avg_len=encoders.bm25_avg_len(texts))
+        out.timings["bm25"] = time.perf_counter() - start
+
+    if needs_late_interaction:
+        key = late_interaction_cache_key(cfg, bundle, cache)
+        cached_late_interaction = cache.load_late_interaction(key)
+        if cached_late_interaction is None:
             start = time.perf_counter()
-            cached_colbert = encoders.embed_docs_colbert(texts)
-            out.timings["colbert"] = time.perf_counter() - start
-            cache.save_colbert(key, cached_colbert, {"model": cfg.models.colbert.name, "dataset": name})
-        out.n_token_vectors = int(sum(m.shape[0] for m in cached_colbert))
-        if "colbert" in representations:
-            out.colbert = cached_colbert
+            cached_late_interaction = encoders.embed_docs_late_interaction(texts)
+            out.timings["late_interaction"] = time.perf_counter() - start
+            cache.save_late_interaction(
+                key, cached_late_interaction,
+                {"model": cfg.models.late_interaction.name, "dataset": name},
+            )
+        out.n_token_vectors = int(sum(m.shape[0] for m in cached_late_interaction))
+        if "late_interaction" in representations:
+            out.late_interaction = cached_late_interaction
 
     if "muvera" in representations:
         muvera = encoders.muvera
         from .muvera import matrices_digest as _muvera_digest
 
-        digest_str = _muvera_digest(muvera, cfg.models.muvera, cfg.models.colbert.dim)
+        digest_str = _muvera_digest(muvera, cfg.models.muvera, cfg.models.late_interaction.dim)
         key = cache.key(
             representation="muvera",
-            model_name=f"fde({cfg.models.colbert.name})",
+            model_name=f"fde({cfg.models.late_interaction.name})",
             dataset=name,
             corpus_digest=digest,
             extra={"matrices": digest_str},
         )
         cached_muvera = cache.load_dense(key)
         if cached_muvera is None:
-            source = cached_colbert if needs_colbert else None
+            source = cached_late_interaction if needs_late_interaction else None
             if source is None:
-                raise RuntimeError("muvera requires colbert token embeddings")
+                raise RuntimeError("muvera requires late_interaction token embeddings")
             start = time.perf_counter()
             cached_muvera = np.stack([muvera.process_document(d) for d in source])
             out.timings["muvera"] = time.perf_counter() - start
@@ -139,16 +148,18 @@ def _dense_params(
     )
 
 
-def colbert_cache_key(
+def late_interaction_cache_key(
     cfg: Config, bundle: LoadedDataset, cache: EmbeddingCache | None = None
 ) -> str:
+    """The model name in the key separates models; the "colbert" namespace is a fixed
+    label for the late-interaction cache, so caches already on disk stay valid."""
     cache = cache or EmbeddingCache(cfg.paths["cache"])
     return cache.key(
         representation="colbert",
-        model_name=cfg.models.colbert.name,
+        model_name=cfg.models.late_interaction.name,
         dataset=bundle.spec.name,
         corpus_digest=bundle.corpus_digest,
-        extra={"doc_max_tokens": cfg.models.colbert.doc_max_tokens},
+        extra={"doc_max_tokens": cfg.models.late_interaction.doc_max_tokens},
     )
 
 
@@ -156,16 +167,16 @@ def _chunk_bounds(total: int, chunk_size: int) -> list[tuple[int, int]]:
     return [(start, min(start + chunk_size, total)) for start in range(0, total, chunk_size)]
 
 
-def _chunk_colbert_cache_key(
+def _chunk_late_interaction_cache_key(
     cfg: Config, bundle: LoadedDataset, cache: EmbeddingCache, chunk_start: int, chunk_end: int
 ) -> str:
     return cache.key(
         representation="colbert",
-        model_name=cfg.models.colbert.name,
+        model_name=cfg.models.late_interaction.name,
         dataset=bundle.spec.name,
         corpus_digest=bundle.corpus_digest,
         extra={
-            "doc_max_tokens": cfg.models.colbert.doc_max_tokens,
+            "doc_max_tokens": cfg.models.late_interaction.doc_max_tokens,
             "chunk_start": chunk_start,
             "chunk_end": chunk_end,
         },
@@ -173,10 +184,10 @@ def _chunk_colbert_cache_key(
 
 
 def token_vector_count(cfg: Config, bundle: LoadedDataset) -> int | None:
-    """Total ColBERT token vectors in this corpus, summed from the per-chunk cache metadata.
+    """Total late-interaction token vectors in this corpus, summed from per-chunk cache metadata.
 
-    Needed to read the ColBERT and MUVERA memory figures: "bytes per million points" is
-    ambiguous by ~100x on a collection whose points each hold a variable number of token
+    Needed to read the late-interaction and MUVERA memory figures: "bytes per million
+    points" is ambiguous by ~100x on a collection whose points each hold a variable number of token
     vectors. Chunk boundaries are deterministic from corpus size and `chunk_size`, so this
     recomputes each chunk's cache key and sums its metadata rather than reloading any
     ragged array, which is gigabytes for the larger corpora. Returns None if any chunk is
@@ -185,7 +196,7 @@ def token_vector_count(cfg: Config, bundle: LoadedDataset) -> int | None:
     cache = EmbeddingCache(cfg.paths["cache"])
     total = 0
     for chunk_start, chunk_end in _chunk_bounds(len(bundle.documents), cfg.run.ingestion.chunk_size):
-        key = _chunk_colbert_cache_key(cfg, bundle, cache, chunk_start, chunk_end)
+        key = _chunk_late_interaction_cache_key(cfg, bundle, cache, chunk_start, chunk_end)
         meta = cache.meta(key)
         if meta is None or meta.get("n_token_vectors") is None:
             return None
@@ -193,17 +204,17 @@ def token_vector_count(cfg: Config, bundle: LoadedDataset) -> int | None:
     return total
 
 
-def _colbert_params(cfg: Config, spec: DatasetSpec) -> models.VectorParams:
+def _late_interaction_params(cfg: Config, spec: DatasetSpec) -> models.VectorParams:
     return models.VectorParams(
-        size=cfg.models.colbert.dim,
-        distance=_distance(cfg.models.colbert.distance),
+        size=cfg.models.late_interaction.dim,
+        distance=_distance(cfg.models.late_interaction.distance),
         multivector_config=models.MultiVectorConfig(
             comparator=models.MultiVectorComparator.MAX_SIM
         ),
         # m=0 disables the HNSW graph. Required, not optional: max_sim is not symmetric,
         # so multivectors are for rescoring and never for prefetch.
-        hnsw_config=models.HnswConfigDiff(m=cfg.models.colbert.hnsw_m),
-        on_disk=spec.colbert_on_disk,
+        hnsw_config=models.HnswConfigDiff(m=cfg.models.late_interaction.hnsw_m),
+        on_disk=spec.late_interaction_on_disk,
     )
 
 
@@ -233,9 +244,17 @@ def vectors_config(
         dense_cfg["muvera"] = _dense_params(
             cfg, cfg.models.muvera.dim, _distance(cfg.models.muvera.distance)
         )
-    if "colbert" in representations:
-        dense_cfg["colbert"] = _colbert_params(cfg, spec)
+    if "late_interaction" in representations:
+        dense_cfg["late_interaction"] = _late_interaction_params(cfg, spec)
     return dense_cfg
+
+
+def sparse_vectors_config(representations: Sequence[str]) -> dict:
+    """Sparse named-vector config. IDF is applied by Qdrant at query time, over the
+    collection actually searched, which is what FastEmbed's BM25 term weights expect."""
+    if "bm25" not in representations:
+        return {}
+    return {"bm25": models.SparseVectorParams(modifier=models.Modifier.IDF)}
 
 
 def create_collection(
@@ -254,6 +273,7 @@ def create_collection(
     client.create_collection(
         collection_name=name,
         vectors_config=dense_cfg or None,
+        sparse_vectors_config=sparse_vectors_config(representations) or None,
         shard_number=shard_number,
     )
 
@@ -267,8 +287,8 @@ def estimate_point_floats(
         total += cfg.models.dense.dim
     if "muvera" in representations:
         total += cfg.models.muvera.dim
-    if "colbert" in representations and vectors.n_token_vectors and n_docs:
-        total += (vectors.n_token_vectors / n_docs) * cfg.models.colbert.dim
+    if "late_interaction" in representations and vectors.n_token_vectors and n_docs:
+        total += (vectors.n_token_vectors / n_docs) * cfg.models.late_interaction.dim
     return max(int(total), 1)
 
 
@@ -420,19 +440,7 @@ def _point(
     representations: Sequence[str],
     i: int,
 ) -> models.PointStruct:
-    doc = bundle.documents[i]
-    vector: dict[str, object] = {}
-    if "dense" in representations:
-        vector["dense"] = vectors.require("dense")[i].tolist()
-    if "muvera" in representations:
-        vector["muvera"] = vectors.require("muvera")[i].tolist()
-    if "colbert" in representations:
-        vector["colbert"] = vectors.require("colbert")[i].tolist()
-    return models.PointStruct(
-        id=bundle.id_map.point(doc.doc_id),
-        vector=vector,
-        payload={"doc_id": doc.doc_id, "text": doc.text},
-    )
+    return _point_from_chunk(bundle, vectors, representations, i, chunk_start=0)
 
 
 def _point_from_chunk(
@@ -442,7 +450,7 @@ def _point_from_chunk(
     global_i: int,
     chunk_start: int,
 ) -> models.PointStruct:
-    """`_point`'s counterpart for chunked embeddings.
+    """Build the point for document `global_i` from one chunk's embeddings.
 
     Two different indices are in play and must not be conflated: `bundle.documents`
     and `bundle.id_map` are indexed globally over the whole corpus, while
@@ -453,10 +461,12 @@ def _point_from_chunk(
     vector: dict[str, object] = {}
     if "dense" in representations:
         vector["dense"] = chunk_vectors.require("dense")[local_i].tolist()
+    if "bm25" in representations:
+        vector["bm25"] = chunk_vectors.require("bm25")[local_i]
     if "muvera" in representations:
         vector["muvera"] = chunk_vectors.require("muvera")[local_i].tolist()
-    if "colbert" in representations:
-        vector["colbert"] = chunk_vectors.require("colbert")[local_i].tolist()
+    if "late_interaction" in representations:
+        vector["late_interaction"] = chunk_vectors.require("late_interaction")[local_i].tolist()
     return models.PointStruct(
         id=bundle.id_map.point(doc.doc_id),
         vector=vector,
@@ -473,6 +483,7 @@ def _embed_chunk(
     *,
     chunk_start: int,
     chunk_end: int,
+    bm25_avg_len: float | None = None,
 ) -> DocumentVectors:
     """Embed one slice of the corpus, reusing the on-disk cache per representation.
 
@@ -486,9 +497,9 @@ def _embed_chunk(
     name = bundle.spec.name
     out = DocumentVectors()
 
-    needs_colbert = "colbert" in representations or "muvera" in representations
+    needs_late_interaction = "late_interaction" in representations or "muvera" in representations
     needs_dense = "dense" in representations
-    cached_colbert: list[np.ndarray] | None = None
+    cached_late_interaction: list[np.ndarray] | None = None
 
     if needs_dense:
         key = cache.key(
@@ -504,24 +515,33 @@ def _embed_chunk(
             cache.save_dense(key, cached, {"model": cfg.models.dense.name, "dataset": name})
         out.dense = cached
 
-    if needs_colbert:
-        key = _chunk_colbert_cache_key(cfg, bundle, cache, chunk_start, chunk_end)
-        cached_colbert = cache.load_colbert(key)
-        if cached_colbert is None:
-            cached_colbert = encoders.embed_docs_colbert(texts)
-            cache.save_colbert(key, cached_colbert, {"model": cfg.models.colbert.name, "dataset": name})
-        out.n_token_vectors = int(sum(m.shape[0] for m in cached_colbert))
-        if "colbert" in representations:
-            out.colbert = cached_colbert
+    # Not cached: BM25 encodes a 10,000-document chunk in about a second.
+    if "bm25" in representations:
+        if bm25_avg_len is None:
+            raise RuntimeError("bm25 needs the whole corpus's avg_len, not a chunk's")
+        out.bm25 = encoders.embed_docs_bm25(texts, avg_len=bm25_avg_len)
+
+    if needs_late_interaction:
+        key = _chunk_late_interaction_cache_key(cfg, bundle, cache, chunk_start, chunk_end)
+        cached_late_interaction = cache.load_late_interaction(key)
+        if cached_late_interaction is None:
+            cached_late_interaction = encoders.embed_docs_late_interaction(texts)
+            cache.save_late_interaction(
+                key, cached_late_interaction,
+                {"model": cfg.models.late_interaction.name, "dataset": name},
+            )
+        out.n_token_vectors = int(sum(m.shape[0] for m in cached_late_interaction))
+        if "late_interaction" in representations:
+            out.late_interaction = cached_late_interaction
 
     if "muvera" in representations:
         muvera = encoders.muvera
         from .muvera import matrices_digest as _muvera_digest
 
-        digest_str = _muvera_digest(muvera, cfg.models.muvera, cfg.models.colbert.dim)
+        digest_str = _muvera_digest(muvera, cfg.models.muvera, cfg.models.late_interaction.dim)
         key = cache.key(
             representation="muvera",
-            model_name=f"fde({cfg.models.colbert.name})",
+            model_name=f"fde({cfg.models.late_interaction.name})",
             dataset=name,
             corpus_digest=digest,
             extra={
@@ -532,9 +552,9 @@ def _embed_chunk(
         )
         cached_muvera = cache.load_dense(key)
         if cached_muvera is None:
-            if cached_colbert is None:
-                raise RuntimeError("muvera requires colbert token embeddings")
-            cached_muvera = np.stack([muvera.process_document(d) for d in cached_colbert])
+            if cached_late_interaction is None:
+                raise RuntimeError("muvera requires late_interaction token embeddings")
+            cached_muvera = np.stack([muvera.process_document(d) for d in cached_late_interaction])
             cache.save_dense(
                 key,
                 cached_muvera,
@@ -576,6 +596,8 @@ def ingest_corpus(
 
     start = time.perf_counter()
     _disable_indexing(client, name)
+    # A corpus statistic, so it is measured over every document before chunking.
+    bm25_avg_len = encoders.bm25_avg_len(bundle.texts) if "bm25" in representations else None
 
     for chunk_start, chunk_end in _chunk_bounds(total, chunk_size):
         chunk_ids = list(range(chunk_start, chunk_end))
@@ -585,7 +607,7 @@ def ingest_corpus(
 
         chunk_vectors = _embed_chunk(
             cfg, bundle, encoders, representations, cache,
-            chunk_start=chunk_start, chunk_end=chunk_end,
+            chunk_start=chunk_start, chunk_end=chunk_end, bm25_avg_len=bm25_avg_len,
         )
         batch_size = safe_batch_size(cfg, chunk_vectors, representations, chunk_end - chunk_start)
         for batch in iter_batches(missing, batch_size):
@@ -669,13 +691,15 @@ def _config_matches(
 ) -> bool:
     """Is an existing collection's vector config the one this run would create?
 
-    Only the vector names, sizes, and distances are compared — those are what make
-    stored points reusable. A mismatch means the points on disk cannot be resumed into.
+    Only the vector names, sizes, distances, and sparse modifiers are compared — those
+    are what make stored points reusable. A mismatch means the points on disk cannot be
+    resumed into.
     """
     try:
-        existing = (client.get_collection(name).config.params.vectors) or {}
+        params = client.get_collection(name).config.params
     except Exception:
         return False
+    existing = params.vectors or {}
     wanted = vectors_config(cfg, spec, representations)
     if set(existing) != set(wanted):
         return False
@@ -683,7 +707,14 @@ def _config_matches(
         have = existing[vector_name]
         if have.size != want.size or have.distance != want.distance:
             return False
-    return True
+    existing_sparse = params.sparse_vectors or {}
+    wanted_sparse = sparse_vectors_config(representations)
+    if set(existing_sparse) != set(wanted_sparse):
+        return False
+    return all(
+        existing_sparse[vector_name].modifier == want.modifier
+        for vector_name, want in wanted_sparse.items()
+    )
 
 
 def build_client(cfg: Config, *, for_queries: bool = False) -> QdrantClient:

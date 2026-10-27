@@ -67,7 +67,7 @@ def run(
     ] = False,
     dense_model: Annotated[
         Optional[str],
-        typer.Option(help="Override the baseline dense model every arm reranks (default: config/models.yaml)"),
+        typer.Option(help="Override the dense first-stage model the dense-family arms rerank (default: config/models.yaml)"),
     ] = None,
     dense_model_dim: Annotated[
         Optional[int],
@@ -82,9 +82,16 @@ def run(
         bool,
         typer.Option(help="Run even when a collection's working set does not fit in Qdrant's memory. Its latency is then disk-bound for the large-vector arms only."),
     ] = False,
+    results_dir: Annotated[
+        Optional[str],
+        typer.Option(help="Write raw records, aggregates, query samples and the manifest here instead of results/ (relative to the repo root). The embedding cache is shared."),
+    ] = None,
 ) -> None:
     """Index, measure memory, execute the interleaved plan, and aggregate."""
     cfg = load_config()
+    if results_dir:
+        cfg = cfg.with_results_dir(results_dir)
+        _echo(f"writing results under {cfg.paths['results']}")
     if depths:
         cfg = cfg.with_depths_override(_parse_depths(depths))
     used_default_dense_model = dense_model is None
@@ -164,7 +171,7 @@ def run(
         manifest_path,
         {
             "muvera_matrices_digest": _muvera_matrices_digest(
-                encoders.muvera, cfg.models.muvera, cfg.models.colbert.dim
+                encoders.muvera, cfg.models.muvera, cfg.models.late_interaction.dim
             )
         },
     )
@@ -250,6 +257,12 @@ def run(
                 "plan_digest": summary.plan_digest,
                 "units": summary.units,
                 "collection_queried": collection,
+                # BM25's length normalisation constant, measured from this corpus.
+                "bm25_avg_len": (
+                    encoders.bm25_avg_len(bundle.texts)
+                    if "bm25" in spec.representations
+                    else None
+                ),
                 "shard_number": 1,
                 # Without the pinned revisions a later rerun can silently retrieve a
                 # different corpus, queries, or qrels from the same repo name.
@@ -276,9 +289,15 @@ def aggregate(
         bool,
         typer.Option(help="Aggregate even if some (arm, depth) units have incomplete records. Never use this for a result you intend to trust."),
     ] = False,
+    results_dir: Annotated[
+        Optional[str],
+        typer.Option(help="Read and write under this results directory instead of results/"),
+    ] = None,
 ) -> None:
     """Re-aggregate from existing raw records without re-running any query."""
     cfg = load_config()
+    if results_dir:
+        cfg = cfg.with_results_dir(results_dir)
     run_all = dataset.strip().lower() == "all"
     names = [spec.name for spec in cfg.datasets.enabled_ordered] if run_all else [dataset]
     for name in names:
@@ -325,7 +344,7 @@ def calibrate_muvera(
     n_docs: Annotated[int, typer.Option(help="Corpus slice to calibrate against")] = 2000,
     n_queries: Annotated[int, typer.Option()] = 25,
 ) -> None:
-    """Measure FDE prefetch recall against exact max_sim on REAL ColBERT embeddings.
+    """Measure FDE prefetch recall against exact max_sim on REAL late-interaction embeddings.
 
     Required before publishing any muvera number. Synthetic vectors cannot validate the
     encoder: on isotropic random tokens the FDE cannot beat a plain summed-token dot
@@ -339,9 +358,9 @@ def calibrate_muvera(
 
     docs = [doc.text for doc in bundle.documents[:n_docs]]
     query_ids = sorted(bundle.eval_queries())[:n_queries]
-    _echo(f"embedding {len(docs)} documents and {len(query_ids)} queries with ColBERT...")
-    doc_tokens = encoders.embed_docs_colbert(docs)
-    query_tokens = [encoders.embed_query_colbert(bundle.queries[qid]) for qid in query_ids]
+    _echo(f"embedding {len(docs)} documents and {len(query_ids)} queries with the late-interaction model...")
+    doc_tokens = encoders.embed_docs_late_interaction(docs)
+    query_tokens = [encoders.embed_query_late_interaction(bundle.queries[qid]) for qid in query_ids]
 
     result = calibrate(
         encoders.muvera,

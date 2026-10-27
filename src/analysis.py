@@ -19,6 +19,7 @@ def _arm_metadata() -> dict[str, dict]:
         name: {
             "requires": arm.requires,
             "group": arm.group,
+            "baseline": arm.baseline,
             "client_side_rerank": arm.client_side_rerank,
             "license_note": arm.license_note,
             "sweeps_depth": arm.sweeps_depth,

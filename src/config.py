@@ -43,7 +43,7 @@ class ExecutionConfig(_Frozen):
     max_stored_results: int
     flush_every: int
     depths: list[int]
-    # colbert_rescore and muvera_colbert issue one extra, untimed Qdrant call per query
+    # late_interaction_rescore and muvera_late_interaction_rescore issue one extra, untimed Qdrant call per query
     # to measure how many relevant documents survived their prefetch stage, independent
     # of the final rescored ranking. Real added wall-clock cost (roughly doubles those
     # two arms' own query-side work), no effect on any recorded latency.
@@ -141,7 +141,9 @@ class RunConfig(_Frozen):
 # ------------------------------------------------------------------------ models
 
 
-class DenseReference(_Frozen):
+class QualityReference(_Frozen):
+    """A published score a baseline must reproduce before any number downstream counts."""
+
     dataset: str
     metric: str
     value: float
@@ -159,10 +161,24 @@ class DenseModel(_Frozen):
     dim: int
     distance: Literal["cosine", "dot", "euclid"]
     max_length: int
-    reference: DenseReference
+    reference: QualityReference
 
 
-class ColbertModel(_Frozen):
+class Bm25Model(_Frozen):
+    """FastEmbed's BM25 (`Qdrant/bm25`): term weights client-side, IDF in Qdrant.
+
+    `avg_len` is deliberately not a field: BM25's length normalisation needs the
+    corpus's own mean document length, so it is measured per dataset at index time.
+    """
+
+    name: str
+    k: float
+    b: float
+    language: str
+    reference: QualityReference
+
+
+class LateInteractionModel(_Frozen):
     name: str
     dim: int
     distance: Literal["cosine", "dot", "euclid"]
@@ -172,10 +188,10 @@ class ColbertModel(_Frozen):
     comparator: Literal["max_sim"]
 
     @model_validator(mode="after")
-    def _m_zero(self) -> ColbertModel:
+    def _m_zero(self) -> LateInteractionModel:
         # max_sim is not symmetric, so HNSW is unreliable on it.
         if self.hnsw_m != 0:
-            raise ValueError("colbert.hnsw_m must be 0; multivectors never prefetch")
+            raise ValueError("late_interaction.hnsw_m must be 0; multivectors never prefetch")
         return self
 
 
@@ -212,7 +228,8 @@ class CrossEncoderModel(_Frozen):
 
 class ModelsConfig(_Frozen):
     dense: DenseModel
-    colbert: ColbertModel
+    bm25: Bm25Model
+    late_interaction: LateInteractionModel
     muvera: MuveraModel
     cross_encoder: CrossEncoderModel
 
@@ -233,7 +250,7 @@ class DatasetSpec(_Frozen):
     enabled: bool
     text_template: str
     qrels_split: str
-    colbert_on_disk_threshold: int
+    late_interaction_on_disk_threshold: int
     measure_memory: bool
     # Per-dataset candidate-depth override; null falls back to execution.depths.
     depths: list[int] | None = None
@@ -245,10 +262,10 @@ class DatasetSpec(_Frozen):
     notes: str | None = None
 
     @property
-    def colbert_on_disk(self) -> bool:
+    def late_interaction_on_disk(self) -> bool:
         if self.corpus_size is None:
             return False
-        return self.corpus_size >= self.colbert_on_disk_threshold
+        return self.corpus_size >= self.late_interaction_on_disk_threshold
 
 
 class DatasetsConfig(_Frozen):
@@ -299,6 +316,26 @@ class Config(_Frozen):
                 "datasets": self.datasets.model_copy(update={"datasets": cleared}),
             }
         )
+
+    def with_results_dir(self, results: str) -> "Config":
+        """Write every run output (raw, agg, queries, manifest) under `results` instead.
+
+        Keeps a new run from touching a recorded one. The embedding cache stays where it
+        is: it is keyed by model, corpus and platform, so sharing it is always safe.
+        """
+        current = self.run.paths
+        base = Path(current.results)
+
+        def moved(path: str) -> str:
+            return str(Path(results) / Path(path).relative_to(base))
+
+        paths = current.model_copy(
+            update={
+                "results": results,
+                **{key: moved(getattr(current, key)) for key in ("raw", "agg", "queries", "manifest")},
+            }
+        )
+        return self.model_copy(update={"run": self.run.model_copy(update={"paths": paths})})
 
     @property
     def paths(self) -> dict[str, Path]:

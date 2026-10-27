@@ -1,14 +1,22 @@
 """Arm registry: name -> callable with a uniform signature.
 
-Every arm reranks ONE unified dense baseline, or a prefetch derived from it.
-Adding an arm requires only a new `@register` block; the runner reads
-the registry and never names an arm directly.
+Two first stages, each a baseline arm of its own: `dense` (bge-small HNSW search) and
+`bm25` (sparse BM25 search). Every other arm reranks the candidates of one of them, is
+named after it (`late_interaction_rescore` vs `bm25_late_interaction_rescore`), and
+declares it as its `baseline`, the arm its quality gain is measured against.
+`muvera_late_interaction_rescore` generates its own candidates and is measured against
+`dense`.
 
-All arms query the dataset's single collection so every prefetch reads the same HNSW graph.
+"Late interaction" names the mechanism, not a model: any multivector model scored with
+MaxSim (ColBERT-family or otherwise) is configured under `late_interaction` in
+config/models.yaml.
 
-Out of scope: hybrid-search/fusion arms (RRF, DBSF, weighted RRF), a BM25 sparse
-baseline, formula/boost rescoring, and sharding. Nothing here builds a sparse vector or
-fuses rank lists.
+Adding an arm requires only a new `@register` block; the runner reads the registry and
+never names an arm directly. All arms query the dataset's single collection, so every
+prefetch reads the same index.
+
+Out of scope: hybrid-search/fusion arms (RRF, DBSF, weighted RRF), formula/boost
+rescoring, and sharding. Nothing here fuses rank lists.
 """
 
 from __future__ import annotations
@@ -62,6 +70,8 @@ class ArmSpec:
     sweeps_depth: bool
     requires: tuple[str, ...]
     group: str
+    # The baseline arm this arm's quality gain is measured against; itself for a baseline.
+    baseline: str
     client_side_rerank: bool = False
     license_note: str | None = None
 
@@ -78,6 +88,7 @@ def register(
     sweeps_depth: bool,
     requires: Sequence[str],
     group: str,
+    baseline: str,
     client_side_rerank: bool = False,
     license_note: str | None = None,
 ):
@@ -88,6 +99,7 @@ def register(
             sweeps_depth=sweeps_depth,
             requires=tuple(requires),
             group=group,
+            baseline=baseline,
             client_side_rerank=client_side_rerank,
             license_note=license_note,
         )
@@ -115,14 +127,23 @@ def _guard_prefetch(depth: int, limit: int) -> None:
         raise ArmError(f"prefetch limit {depth} < final limit {limit}; would truncate results")
 
 
-def dense_prefetch(query, limit: int) -> models.Prefetch:
-    """Dense candidate generation — the first stage the prefetch-based arms share.
+FIRST_STAGES = ("dense", "bm25")
 
-    Full precision, because no vector in this collection is quantized. Identical
-    retrieval to the `dense` baseline, so the quality difference between an arm and the
-    baseline is attributable to that arm's reranking alone.
+
+def first_stage_query(ctx: ArmContext, timers: QueryTimers, first_stage: str, query: str):
+    """Embed `query` for a first stage, timed into that stage's own embed bucket.
+
+    Returns what Qdrant searches the `first_stage` named vector with: a dense vector
+    for `dense`, a sparse vector for `bm25`. Both are identical to what that stage's
+    baseline arm sends, so an arm's difference from its baseline is its reranking alone.
     """
-    return models.Prefetch(query=query, using="dense", limit=limit)
+    if first_stage == "dense":
+        with timers.embed("dense"):
+            return ctx.encoders.embed_query_dense(query).tolist()
+    if first_stage == "bm25":
+        with timers.embed("bm25"):
+            return ctx.encoders.embed_query_bm25(query)
+    raise ArmError(f"unknown first stage {first_stage!r}; expected one of {FIRST_STAGES}")
 
 
 def _pool_doc_ids(ctx: ArmContext, *, query, using: str, depth: int) -> list[str] | None:
@@ -224,89 +245,116 @@ def run_query(ctx: ArmContext, timers: QueryTimers, *, map_ids: bool = True, **k
 # ---------------------------------------------------------------------- baselines
 
 
-@register("dense", sweeps_depth=False, requires=["dense"], group="baseline")
-def dense_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
-    """The unified baseline every other arm reranks: a single dense HNSW search,
-    full precision, no reranking stage."""
+def _first_stage_search(ctx: ArmContext, query: str, depth: int | None, *, first_stage: str) -> ArmOutput:
+    """A first stage on its own, with no reranking: the baseline for its family."""
     timers = QueryTimers()
     limit = _final_limit(ctx, depth)
-    with timers.embed("dense"):
-        vector_list = ctx.encoders.embed_query_dense(query).tolist()
+    first_stage_vec = first_stage_query(ctx, timers, first_stage, query)
     retrieved = run_query(
         ctx,
         timers,
-        query=vector_list,
-        using="dense",
+        query=first_stage_vec,
+        using=first_stage,
         limit=limit,
         with_payload=["doc_id"],
     )
     return ArmOutput(retrieved, timers)
 
 
+@register("dense", sweeps_depth=False, requires=["dense"], group="baseline", baseline="dense")
+def dense_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
+    """Dense baseline: a single full-precision HNSW search, no reranking stage."""
+    return _first_stage_search(ctx, query, depth, first_stage="dense")
+
+
+@register("bm25", sweeps_depth=False, requires=["bm25"], group="baseline", baseline="bm25")
+def bm25_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
+    """Sparse baseline: a single BM25 search over Qdrant's inverted index, IDF applied
+    server-side, no reranking stage."""
+    return _first_stage_search(ctx, query, depth, first_stage="bm25")
+
+
 # --------------------------------------------------------------------- rescoring
 #
-# Every arm below reranks the SAME dense baseline (`dense_arm` above), or a prefetch
-# derived from it. Fusion arms and a sparse baseline are out of scope because they
-# combine retrievers rather than rescore a candidate set; so are sharding and
-# formula-rescore machinery.
+# Every arm below reranks the candidates of one first stage, or
+# (`muvera_late_interaction_rescore`) generates its own. Fusion arms are out of scope because they combine retrievers rather
+# than rescore a candidate set; so are sharding and formula-rescore machinery.
 
 
-@register(
-    "colbert_rescore",
-    sweeps_depth=True,
-    requires=["dense", "colbert"],
-    group="rescoring",
-)
-def colbert_rescore_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
-    """Full-precision dense prefetch, then ColBERT max_sim rescoring inside Qdrant."""
+def _late_interaction_rescore(ctx: ArmContext, query: str, depth: int | None, *, first_stage: str) -> ArmOutput:
+    """`first_stage` prefetch, then late-interaction max_sim rescoring inside Qdrant."""
     if depth is None:
-        raise ArmError("colbert_rescore sweeps depth; depth must be set")
+        raise ArmError("late-interaction rescoring sweeps depth; depth must be set")
     timers = QueryTimers()
     limit = _final_limit(ctx, depth)
     _guard_prefetch(depth, limit)
 
-    with timers.embed("dense"):
-        dense_vec_list = ctx.encoders.embed_query_dense(query).tolist()
-    with timers.embed("colbert"):
-        colbert_tokens_list = ctx.encoders.embed_query_colbert(query).tolist()
+    first_stage_vec = first_stage_query(ctx, timers, first_stage, query)
+    with timers.embed("late_interaction"):
+        late_interaction_tokens_list = ctx.encoders.embed_query_late_interaction(query).tolist()
     retrieved = run_query(
         ctx,
         timers,
-        prefetch=[dense_prefetch(dense_vec_list, depth)],
-        query=colbert_tokens_list,
-        using="colbert",
+        prefetch=[models.Prefetch(query=first_stage_vec, using=first_stage, limit=depth)],
+        query=late_interaction_tokens_list,
+        using="late_interaction",
         limit=limit,
         with_payload=["doc_id"],
     )
-    pool = _pool_doc_ids(ctx, query=dense_vec_list, using="dense", depth=depth)
+    pool = _pool_doc_ids(ctx, query=first_stage_vec, using=first_stage, depth=depth)
     return ArmOutput(retrieved, timers, pool_doc_ids=pool)
 
 
 @register(
-    "muvera_colbert",
+    "late_interaction_rescore",
     sweeps_depth=True,
-    requires=["muvera", "colbert"],
+    requires=["dense", "late_interaction"],
     group="rescoring",
+    baseline="dense",
 )
-def muvera_colbert_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
-    """MUVERA FDE prefetch, then exact ColBERT max_sim rescoring inside Qdrant."""
+def late_interaction_rescore_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
+    """Full-precision dense prefetch, then late-interaction max_sim rescoring inside Qdrant."""
+    return _late_interaction_rescore(ctx, query, depth, first_stage="dense")
+
+
+@register(
+    "bm25_late_interaction_rescore",
+    sweeps_depth=True,
+    requires=["bm25", "late_interaction"],
+    group="rescoring",
+    baseline="bm25",
+)
+def bm25_late_interaction_rescore_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
+    """BM25 prefetch, then late-interaction max_sim rescoring inside Qdrant."""
+    return _late_interaction_rescore(ctx, query, depth, first_stage="bm25")
+
+
+@register(
+    "muvera_late_interaction_rescore",
+    sweeps_depth=True,
+    requires=["muvera", "late_interaction"],
+    group="rescoring",
+    baseline="dense",
+)
+def muvera_late_interaction_rescore_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
+    """MUVERA FDE prefetch, then exact late-interaction max_sim rescoring inside Qdrant."""
     if depth is None:
-        raise ArmError("muvera_colbert sweeps depth; depth must be set")
+        raise ArmError("muvera_late_interaction_rescore sweeps depth; depth must be set")
     timers = QueryTimers()
     limit = _final_limit(ctx, depth)
     _guard_prefetch(depth, limit)
 
-    with timers.embed("colbert"):
-        colbert_tokens = ctx.encoders.embed_query_colbert(query)
-        colbert_tokens_list = colbert_tokens.tolist()
+    with timers.embed("late_interaction"):
+        late_interaction_tokens = ctx.encoders.embed_query_late_interaction(query)
+        late_interaction_tokens_list = late_interaction_tokens.tolist()
     with timers.embed("muvera"):
-        muvera_vec_list = ctx.encoders.muvera.process_query(colbert_tokens).tolist()
+        muvera_vec_list = ctx.encoders.muvera.process_query(late_interaction_tokens).tolist()
     retrieved = run_query(
         ctx,
         timers,
         prefetch=[models.Prefetch(query=muvera_vec_list, using="muvera", limit=depth)],
-        query=colbert_tokens_list,
-        using="colbert",
+        query=late_interaction_tokens_list,
+        using="late_interaction",
         limit=limit,
         with_payload=["doc_id"],
     )
@@ -314,33 +362,25 @@ def muvera_colbert_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOut
     return ArmOutput(retrieved, timers, pool_doc_ids=pool)
 
 
-@register(
-    "cross_encoder",
-    sweeps_depth=True,
-    requires=["dense"],
-    group="rescoring",
-    client_side_rerank=True,
-)
-def cross_encoder_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
-    """Full-precision dense candidate generation, then scoring in the Python process.
+def _cross_encoder(ctx: ArmContext, query: str, depth: int | None, *, first_stage: str) -> ArmOutput:
+    """`first_stage` candidate generation, then scoring in the Python process.
 
-    Architecturally different from every other arm: Qdrant returns candidates and the
-    sort happens locally, so Qdrant time is small and client time is large. That
+    Architecturally different from the server-side arms: Qdrant returns candidates and
+    the sort happens locally, so Qdrant time is small and client time is large. That
     contrast is the point.
 
     The candidate query is the top-level query rather than a prefetch, since nothing is
-    rescored server-side — but it is the same full-precision dense retrieval the other
-    prefetch-based arms use, so all of them start from the same candidate set.
+    rescored server-side — but it is the same retrieval as the first stage's baseline
+    and the server-side arms' prefetch, so all of them start from the same candidates.
     """
     if depth is None:
-        raise ArmError("cross_encoder sweeps depth; depth must be set")
+        raise ArmError("cross-encoder reranking sweeps depth; depth must be set")
     timers = QueryTimers()
     limit = _final_limit(ctx, depth)
     _guard_prefetch(depth, limit)
-    with timers.embed("dense"):
-        dense_vec_list = ctx.encoders.embed_query_dense(query).tolist()
+    first_stage_vec = first_stage_query(ctx, timers, first_stage, query)
     candidates = run_query(
-        ctx, timers, map_ids=False, query=dense_vec_list, using="dense",
+        ctx, timers, map_ids=False, query=first_stage_vec, using=first_stage,
         limit=depth, with_payload=["doc_id", "text"],
     )
 
@@ -357,11 +397,37 @@ def cross_encoder_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutp
     return ArmOutput(retrieved, timers, pool_doc_ids=pool)
 
 
+@register(
+    "cross_encoder",
+    sweeps_depth=True,
+    requires=["dense"],
+    group="rescoring",
+    baseline="dense",
+    client_side_rerank=True,
+)
+def cross_encoder_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
+    """Full-precision dense candidates, then a client-side cross-encoder."""
+    return _cross_encoder(ctx, query, depth, first_stage="dense")
+
+
+@register(
+    "bm25_cross_encoder",
+    sweeps_depth=True,
+    requires=["bm25"],
+    group="rescoring",
+    baseline="bm25",
+    client_side_rerank=True,
+)
+def bm25_cross_encoder_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
+    """BM25 candidates, then a client-side cross-encoder."""
+    return _cross_encoder(ctx, query, depth, first_stage="bm25")
+
+
 # ------------------------------------------------------------------- resolution
 
 
 def muvera_calibration_status(cfg: Config, dataset: str) -> tuple[bool, str]:
-    """Is `muvera_colbert` allowed to run on this dataset?
+    """Is `muvera_late_interaction_rescore` allowed to run on this dataset?
 
     `muvera.calibrated: true` in config is a manual override for someone who has
     verified the model themselves; absent that, a passing calibration artifact for
@@ -425,7 +491,7 @@ def resolve_arms(cfg: Config, dataset: str, *, include: Sequence[str] | None = N
                 f"dataset {dataset} does not index representation(s): {', '.join(missing)}"
             )
             continue
-        if name == "muvera_colbert":
+        if name == "muvera_late_interaction_rescore":
             ok, reason = muvera_calibration_status(cfg, dataset)
             if not ok:
                 exclusions[name] = reason

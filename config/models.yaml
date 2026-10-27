@@ -32,7 +32,32 @@ dense:
     observed: 0.3314
     verified: true
 
-colbert:
+bm25:
+  # The sparse first stage. FastEmbed computes each document's BM25 term weights
+  # (stemming, stopwords, saturation k, length normalisation b) and Qdrant applies IDF
+  # server-side through the sparse vector's `modifier: idf`, so IDF always reflects the
+  # collection actually queried. k and b are FastEmbed's defaults and the textbook
+  # Lucene values. avg_len is measured from each corpus at index time and recorded in
+  # the manifest; FastEmbed's fixed default (256) would mis-normalise document length.
+  name: "Qdrant/bm25"
+  k: 1.2
+  b: 0.75
+  language: english
+  # Gate 1 for the sparse baseline. The published figure is BM25 (Elasticsearch) from
+  # the BEIR paper. An offline exact-scoring check of this exact tokenizer, k, b and
+  # measured avg_len gave 0.3275 on all 323 judged queries; the gate re-measures it
+  # through Qdrant.
+  reference:
+    dataset: nfcorpus
+    metric: "ndcg@10"
+    value: 0.325
+    tolerance: 0.02
+    source: "BEIR, Thakur et al. 2021 (arXiv:2104.08663), Table 2, BM25 on NFCorpus"
+    query_set: "all 323 nfcorpus test queries"
+    observed: 0.3275
+    verified: true
+
+late_interaction:
   name: "colbert-ir/colbertv2.0"
   dim: 128
   distance: cosine
@@ -46,9 +71,9 @@ muvera:
   # fastembed.postprocess.Muvera — the reference implementation the MUVERA/Qdrant
   # ecosystem uses. k_sim/n_reps/d_proj are fastembed's own defaults (k_sim=5, r_reps=20,
   # dim_proj=16), matching the Qdrant MUVERA article's NFCorpus/ColBERTv2 benchmark
-  # config. Run `benchmark calibrate-muvera` (real ColBERT embeddings) before
+  # config. Run `benchmark calibrate-muvera` (real late-interaction embeddings) before
   # publishing any muvera number, and record the outcome here.
-  source_tokens: colbert
+  source_tokens: late_interaction
   k_sim: 5          # -> 2**5 = 32 clusters
   n_reps: 20
   d_proj: 16

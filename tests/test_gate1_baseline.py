@@ -1,8 +1,9 @@
-"""Gate 1 — the baseline reproduces the published NDCG.
+"""Gate 1 — each baseline reproduces its published NDCG.
 
-`dense` on NFCorpus must match the published BEIR NDCG@10 for the chosen model within
-~0.01. If it does not, something is wrong in qrels parsing, ID mapping, or the metric
-call, and every downstream number is invalid. Nothing else matters until this passes.
+`dense` and `bm25` on NFCorpus must each match a published NDCG@10 within the tolerance
+pinned in config/models.yaml. If either does not, something is wrong in qrels parsing,
+ID mapping, document text, the encoder setup, or the metric call, and every number
+measured against that baseline is invalid. Nothing else matters until this passes.
 
 Run against the FULL 323-query NFCorpus test set, not the subsample: the published figure
 is a full-set number and a 250-query subsample is not comparable to it.
@@ -20,19 +21,41 @@ from src.metrics import build_run_dict, evaluate_quality
 pytestmark = [pytest.mark.gate, pytest.mark.slow]
 
 
-def test_gate1_reference_is_verified(cfg):
+BASELINES = ["dense", "bm25"]
+
+
+@pytest.mark.parametrize("baseline", BASELINES)
+def test_gate1_reference_is_verified(cfg, baseline):
     """A reference number nobody checked makes the gate either vacuous or falsely failing."""
-    ref = cfg.models.dense.reference
+    ref = getattr(cfg.models, baseline).reference
     if not ref.verified:
         pytest.fail(
-            f"config/models.yaml pins dense.reference.{ref.metric}={ref.value} on "
+            f"config/models.yaml pins {baseline}.reference.{ref.metric}={ref.value} on "
             f"{ref.dataset} with verified: false. Confirm it against {ref.source} and set "
             "verified: true before trusting Gate 1 or publishing anything downstream."
         )
 
 
-def test_gate1_dense_matches_published_ndcg(cfg, nfcorpus, encoders, nfcorpus_collection):
-    ref = cfg.models.dense.reference
+def test_gate1_bm25_avg_len_is_the_length_fastembed_normalises_by(encoders):
+    """`bm25_avg_len` counts tokens through FastEmbed's private preprocessing helpers.
+
+    If a FastEmbed upgrade changes them, avg_len silently stops matching the document
+    length BM25 divides by. A document whose length equals avg_len must get exactly the
+    length-neutral weight f*(k+1)/(f+k) for every term.
+    """
+    text = "Vitamin D deficiency and vitamin D supplementation in elderly patients."
+    avg_len = encoders.bm25_avg_len([text])
+    (doc,) = encoders.embed_docs_bm25([text], avg_len=avg_len)
+    k = encoders.models.bm25.k
+    counts = sorted(round(w * k / (k + 1 - w)) for w in doc.values)  # invert f(k+1)/(f+k)
+    assert sum(counts) == avg_len, (counts, avg_len)
+    for weight, f in zip(sorted(doc.values), counts):
+        assert weight == pytest.approx(f * (k + 1) / (f + k))
+
+
+@pytest.mark.parametrize("baseline", BASELINES)
+def test_gate1_baseline_matches_published_ndcg(cfg, nfcorpus, encoders, nfcorpus_collection, baseline):
+    ref = getattr(cfg.models, baseline).reference
     assert ref.dataset == "nfcorpus", "Gate 1 is defined against nfcorpus"
 
     client = build_client(cfg, for_queries=True)
@@ -44,7 +67,7 @@ def test_gate1_dense_matches_published_ndcg(cfg, nfcorpus, encoders, nfcorpus_co
         collection=nfcorpus_collection,
         dataset="nfcorpus",
     )
-    arm = REGISTRY["dense"]
+    arm = REGISTRY[baseline]
 
     # Full query set, judged queries only.
     qrels = _all_qrels(nfcorpus)
@@ -64,7 +87,7 @@ def test_gate1_dense_matches_published_ndcg(cfg, nfcorpus, encoders, nfcorpus_co
     assert observed is not None, "metric did not evaluate"
     delta = abs(observed - ref.value)
     assert delta <= ref.tolerance, (
-        f"Gate 1 FAILED: {ref.metric}={observed:.4f} on {len(run)} nfcorpus queries, "
+        f"Gate 1 FAILED for {baseline}: {ref.metric}={observed:.4f} on {len(run)} nfcorpus queries, "
         f"published {ref.value:.4f} (delta {delta:.4f} > tolerance {ref.tolerance}). "
         "Suspect qrels parsing, ID mapping, document text construction, or the metric "
         "call — not the model. Every downstream number is invalid until this passes."

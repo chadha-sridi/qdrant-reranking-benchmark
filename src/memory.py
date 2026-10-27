@@ -224,8 +224,8 @@ def check_fits_in_memory(memory: CollectionMemory, server_memory_bytes: int) -> 
     """Fail when the collection cannot stay resident on the server.
 
     A working set larger than the server's memory is read from disk on every query, so
-    the arms that touch the large vectors (ColBERT, MUVERA) would be measured on disk
-    rather than on Qdrant, while `dense` and the cross-encoder's dense search, whose
+    the arms that touch the large vectors (late interaction, MUVERA) would be measured on
+    disk rather than on Qdrant, while `dense` and the cross-encoder's dense search, whose
     vectors are small, would not. That is a bias between arms, not just a slower run.
     """
     budget = int(server_memory_bytes * MAX_WORKING_SET_FRACTION)

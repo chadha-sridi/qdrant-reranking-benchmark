@@ -32,7 +32,7 @@ Experiments can be run at different candidate depths to see how each strategy sc
 - **Python 3.11+**
 - **Docker**, with the daemon running. `docker compose` (plugin or standalone) is used
   if present; otherwise the code falls back to plain `docker run` automatically.
-- **~2 GB disk** for model weights (dense + ColBERT + cross-encoder, downloaded on
+- **~2 GB disk** for model weights (dense + late interaction + cross-encoder, downloaded on
   first use via FastEmbed/Hugging Face Hub) plus space for corpus caches and Qdrant
   storage — a few hundred MB for the small datasets, much more for Quora.
 - **Network access** to Hugging Face Hub, for both the BEIR datasets and the model
@@ -62,7 +62,7 @@ colima stop && colima start --cpu 8 --memory 10
 The VM's CPUs are not reserved: queries run one at a time, so an idle Qdrant leaves those
 cores to the client. The manifest records the VM's CPUs and memory under
 `qdrant.server_resources`, and `run` refuses a collection whose working set exceeds 80%
-of that memory, since the arms reading the large vectors (ColBERT, MUVERA) would then be
+of that memory, since the arms reading the large vectors (late interaction, MUVERA) would then be
 measured on disk while `dense` would not.
 
 Qdrant's storage is a **Docker named volume**, not a host bind mount. This is a
@@ -109,7 +109,7 @@ instead, since that works without installing anything.
 config/
 ├── run.yaml           seeds, query sampling, execution (repeats/depths), Qdrant
 │                       connection, arm enablement
-├── models.yaml         model names/dims, ColBERT/MUVERA params,
+├── models.yaml         model names/dims, late-interaction/MUVERA params,
 │                       cross-encoder(s), the Gate 1 reference NDCG
 └── datasets.yaml       per-dataset HF source, size, representations, depth overrides
 
@@ -162,7 +162,7 @@ what lives where, so you know which file to edit:
 | File | Controls |
 |---|---|
 | `run.yaml` | seeds, how many queries are sampled and how they're split, repeats, candidate depths, Qdrant connection and HNSW/indexing thresholds, which arms run by default |
-| `models.yaml` | model names and dimensions, ColBERT/MUVERA parameters, the pinned Gate 1 reference score |
+| `models.yaml` | model names and dimensions, late-interaction/MUVERA parameters, the pinned Gate 1 reference score |
 | `datasets.yaml` | which BEIR datasets are enabled, their HF source, corpus size, which representations to index, per-dataset depth overrides |
 
 Most of these values are also overridable per invocation via CLI flags (below) without
@@ -181,7 +181,7 @@ Five BEIR datasets, run smallest corpus first.
 | **SciFact** | 5,183 | Scientific claim verification — retrieve abstracts that support or refute a claim. ~1.1 relevant docs per query, so effectively one correct answer each. |
 | **SCIDOCS** | 25,657 | Scientific paper retrieval from citation context. Exactly 5 relevant docs per query, always — an unusually uniform relevance profile. |
 | **FiQA-2018** | 57,638 | Financial opinion question answering over investor forum posts. ~2.6 relevant docs per query. |
-| **Quora** *(out of the default set)* | 522,931 | Duplicate-question retrieval. ~1.6 relevant docs per query. Largest corpus here, so ColBERT multivectors are forced on-disk — the only dataset exercising that regime. Kept out of `--dataset all` and capped at 500 queries because all 10,000 would be ~80% of the benchmark's runtime; run it explicitly with `--dataset quora`. |
+| **Quora** *(out of the default set)* | 522,931 | Duplicate-question retrieval. ~1.6 relevant docs per query. Largest corpus here, so late-interaction multivectors are forced on-disk — the only dataset exercising that regime. Kept out of `--dataset all` and capped at 500 queries because all 10,000 would be ~80% of the benchmark's runtime; run it explicitly with `--dataset quora`. |
 
 Together they span 144× in corpus size and 1.1→38 in relevance density, so a strategy
 that only wins on sparse-judgment or only on dense-judgment data can't hide.
@@ -218,28 +218,55 @@ NFCorpus's 0/1/2 down to binary.
 
 ## Arms
 
-**Every arm reranks one unified dense baseline, or a prefetch derived from it.**
-Hybrid-search/fusion strategies (RRF, DBSF, weighted
-RRF) and a BM25 sparse baseline are out of scope for a *reranking* benchmark: they
-combine retrievers rather than rescore a candidate set with a richer relevance signal.
+**Two first stages, each a baseline, each reranked by the same rerankers.** `dense`
+(bge-small) and `bm25` (sparse) are both first-stage retrievers; every reranking arm
+starts from the candidates of one of them and is named after it. Each arm's aggregate
+row carries a `baseline` column naming the arm its gain is measured against.
+Hybrid-search/fusion strategies (RRF, DBSF, weighted RRF) are out of scope for a
+*reranking* benchmark: they combine retrievers rather than rescore a candidate set with
+a richer relevance signal.
 
-| # | Arm | Sweeps depth | Default | Mechanism |
-|---|---|:---:|:---:|---|
-| 1 | `dense` | | ✓ | The baseline itself — a single dense HNSW search, no reranking stage |
-| 2 | `colbert_rescore` | ✓ | ✓ | Dense prefetch → ColBERT `max_sim` |
-| 3 | `muvera_colbert` | ✓ | ✓ | MUVERA prefetch → exact `max_sim` (⚠️ see [Known limitations](#known-limitations)) |
-| 4 | `cross_encoder` | ✓ | ✓ | Dense prefetch → client-side cross-encoder rerank |
+| Arm | Baseline | Sweeps depth | Mechanism |
+|---|---|:---:|---|
+| `dense` | itself | | A single dense HNSW search, no reranking stage |
+| `late_interaction_rescore` | `dense` | ✓ | Dense prefetch → late-interaction `max_sim` |
+| `muvera_late_interaction_rescore` | `dense` | ✓ | MUVERA prefetch → exact `max_sim` (⚠️ see [Known limitations](#known-limitations)) |
+| `cross_encoder` | `dense` | ✓ | Dense prefetch → client-side cross-encoder rerank |
+| `bm25` | itself | | A single BM25 search over Qdrant's sparse inverted index, no reranking stage |
+| `bm25_late_interaction_rescore` | `bm25` | ✓ | BM25 prefetch → late-interaction `max_sim` |
+| `bm25_cross_encoder` | `bm25` | ✓ | BM25 prefetch → client-side cross-encoder rerank |
 
-**The baseline model is a runtime parameter, not just a config edit.** Default is
+All seven run by default. Both families run in the same interleaved pass against the
+same collection, so the two baselines are measured under identical conditions and the
+significance table compares every pair, across families too. To run one family only,
+name its arms: `--arms bm25,bm25_late_interaction_rescore,bm25_cross_encoder`.
+`muvera_late_interaction_rescore` has no BM25 counterpart: MUVERA is a first stage of its
+own, so it is measured against `dense`, the other single-vector first stage.
+
+**BM25 is FastEmbed's `Qdrant/bm25` with IDF applied by Qdrant.** FastEmbed computes
+each document's term weights (English stemming and stopwords, `k=1.2`, `b=0.75`) and
+the sparse vector's `modifier: idf` makes Qdrant apply IDF over the collection being
+searched. BM25's length normalisation needs the corpus's mean document length:
+FastEmbed defaults it to a fixed 256, so the benchmark measures it per corpus with the
+encoder's own tokenizer and records it in the manifest as `bm25_avg_len`. Query
+weights are all 1, so queries don't depend on it.
+
+**The dense model is a runtime parameter, not just a config edit.** Default is
 `BAAI/bge-small-en-v1.5`; override with `--dense-model NAME` (and `--dense-model-dim N`
-if FastEmbed's own registry can't resolve the dimension for an unlisted model).
-Overriding it invalidates the pinned Gate 1 reference score, and the CLI says so.
+if FastEmbed's own registry can't resolve the dimension for an unlisted model). It
+replaces the `dense` first stage only; the `bm25` family is unaffected. Overriding it
+invalidates the pinned Gate 1 reference score for `dense`, and the CLI says so.
 
-**Arms 2 and 3 use `max_sim`**, the only multivector comparator Qdrant offers. The
-ColBERT vector is indexed with HNSW `m=0` — required, not optional, since `max_sim`
+**"Late interaction" names the mechanism, not a model.** Any multivector model scored
+with MaxSim goes under `late_interaction` in `config/models.yaml`; it is currently
+`colbert-ir/colbertv2.0`, and the measurements quoted in this README are from that
+model.
+
+**The late-interaction arms use `max_sim`**, the only multivector comparator Qdrant
+offers. The late-interaction vector is indexed with HNSW `m=0` — required, not optional, since `max_sim`
 isn't symmetric — so it's never used for ANN prefetch, only for rescoring a candidate
-set that arrived some other way. That's also why arm 3 is *exact* MaxSim: MUVERA
-supplies the (approximate) prefetch, ColBERT supplies an exact rescore over it.
+set that arrived some other way. That's also why `muvera_late_interaction_rescore` is *exact* MaxSim:
+MUVERA supplies the (approximate) prefetch, MaxSim an exact rescore over it.
 
 Exclusions (representation missing for a dataset, arm gated, etc.) are always
 reported, never silently dropped — run `python -m src.cli plan` to see them for any
@@ -301,18 +328,23 @@ PubMed-style abstracts; expect a different figure on short-document corpora.
 | ColBERT | ~2.0h |
 | **Total** | **~3.4h** for all five (Quora alone is ~2.9h; the default set is ~0.5h) |
 
-**Per full run** — querying at `repeats: 1`, all four arms, every evaluated query.
-`cross_encoder` is ~97% of it:
+BM25 is not cached and needs no model: it encodes ~10,000 documents a second, so it is
+re-encoded on every build.
+
+**Per full run** — querying at `repeats: 1`, all seven arms, every evaluated query. The
+two cross-encoder arms are ~98% of it, each costing what `cross_encoder` alone measured
+in the four-arm run; the figures below are that run's measurements with the second
+cross-encoder arm added, not yet re-measured:
 
 | Dataset | Depths | Evaluated queries | Est. hours |
 |---|---|---:|---:|
-| nfcorpus | 10/25/50/100/200/500 | 273 | ~2.8h |
-| scifact | 10/25/50/100/200 | 250 | ~1.2h |
-| scidocs | 10/25/50/100/200 | 950 | ~3.9h |
-| fiqa | 10/25/50/100/200 | 598 | ~2.5h |
-| **`--dataset all` total** | | **2,071** | **~10.4h** |
-| quora *(separate, capped)* | 10/25/50/100/200 | 450 | ~1.8h |
-| quora *(uncapped, if you lift the cap)* | 10/25/50/100/200 | 9,950 | ~38.7h |
+| nfcorpus | 10/25/50/100/200/500 | 273 | ~5.5h |
+| scifact | 10/25/50/100/200 | 250 | ~2.4h |
+| scidocs | 10/25/50/100/200 | 950 | ~7.7h |
+| fiqa | 10/25/50/100/200 | 598 | ~4.9h |
+| **`--dataset all` total** | | **2,071** | **~20.5h** |
+| quora *(separate, capped)* | 10/25/50/100/200 | 450 | ~3.5h |
+| quora *(uncapped, if you lift the cap)* | 10/25/50/100/200 | 9,950 | ~76h |
 
 Quora sits out of the default set for exactly this reason: uncapped it is ~80% of the
 total for a dataset that saturates by depth 50.
@@ -322,11 +354,11 @@ Measured per-query cost at depth 500 shows where it all goes:
 | Arm | ms/query @ depth 500 |
 |---|---:|
 | **`cross_encoder`** | **17,319** |
-| `muvera_colbert` | 129 |
-| `colbert_rescore` | 112 |
+| `muvera_late_interaction_rescore` | 129 |
+| `late_interaction_rescore` | 112 |
 | `dense` (no depth) | 10 |
 
-`cross_encoder` dominates because it is the only arm that reranks client-side: a
+The cross-encoder arms dominate because they are the only ones that rerank client-side: a
 transformer forward pass per (query, document) pair on CPU, where every other arm
 pushes the work into Qdrant as vector arithmetic. Its cost scales linearly with the
 **sum** of the swept depths, so the deepest point dominates — depth 500 alone is 56% of
@@ -336,13 +368,14 @@ Levers, in order of effect:
 
 | Change | Saves | Costs you |
 |---|---|---|
-| Lift Quora's 500-query cap | costs ~37h | tighter CI on the one large-corpus dataset |
-| Cap `cross_encoder` at depth ≤100 | ~75% of its cost | the deep end of its depth curve only |
-| Drop NFCorpus depth 500 | ~1.3h | the only depth point past 200 with real headroom |
-| Drop `cross_encoder` entirely | ~10h of the ~10.4h | your only client-side reranking arm |
+| Lift Quora's 500-query cap | costs ~72h | tighter CI on the one large-corpus dataset |
+| Cap the cross-encoder arms at depth ≤100 | ~75% of their cost | the deep end of their depth curves only |
+| Drop NFCorpus depth 500 | ~2.6h | the only depth point past 200 with real headroom |
+| Run one family only (`--arms`) | ~10h of the ~20.5h | the other first stage |
+| Drop both cross-encoder arms | ~20h of the ~20.5h | your only client-side reranking arms |
 
-Depth 500 on NFCorpus costs 17.4s/query for `cross_encoder` alone — ~1.3h, roughly half
-of NFCorpus's total. It is kept because NFCorpus (38 relevant docs/query) is the only
+Depth 500 on NFCorpus costs 17.4s/query per cross-encoder arm — ~1.3h each, roughly
+half of NFCorpus's total. It is kept because NFCorpus (38 relevant docs/query) is the only
 dataset with real quality headroom past depth 200.
 
 ---
@@ -350,14 +383,14 @@ dataset with real quality headroom past depth 200.
 ## Collection layout and ingestion
 
 **One collection per dataset, named after the dataset**, holding every representation
-as a **named vector** on the same points — `dense`, `muvera`, and `colbert`, all
-fp32. Every arm queries that one collection, so each arm's prefetch
+as a **named vector** on the same points — `dense`, `muvera`, and `late_interaction`, all
+fp32, plus the sparse `bm25`. Every arm queries that one collection, so each arm's prefetch
 reads the same HNSW graph, the same payload, and the same page cache; the only thing
 that differs between arms is the strategy under test. One collection per representation
 would make arm-to-arm latency incomparable, which is the benchmark's primary axis.
 
 No vector carries a quantization config, so every arm reads full precision end to end
-and no arm's numbers can be a comparison of two different precisions. `colbert` is
+and no arm's numbers can be a comparison of two different precisions. `late_interaction` is
 deliberately built with `m=0` — no HNSW
 graph at all — because `max_sim` is not a metric space, so multivectors are only ever
 used for rescoring, never for prefetch.
@@ -373,7 +406,7 @@ different algorithms. 10 is the smallest value Qdrant accepts (it rejects 0).
 ```
 wipe storage + restart Qdrant   (clean slate; skipped by --resume-ingestion)
   -> embed corpus               (disk-cached, keyed by model + corpus + platform)
-  -> create collection          (named vectors, m=0 on colbert)
+  -> create collection          (named vectors, m=0 on late_interaction)
   -> disable indexing           (indexing_threshold = 0 for the upload)
   -> upload in size-aware batches   (sized from actual vector width, under Qdrant's 32 MB cap)
   -> restore indexing_threshold     (this is what triggers one clean HNSW build)
@@ -411,14 +444,15 @@ only aggregated at analysis time:
 
 | Field | What it is |
 |---|---|
-| `t_embed_dense_ms` | client-side dense query embedding (`dense`, `colbert_rescore`, `cross_encoder`) |
-| `t_embed_colbert_ms` | client-side ColBERT query embedding (`colbert_rescore`, `muvera_colbert`) |
-| `t_embed_muvera_ms` | the MUVERA FDE transform of the ColBERT query tokens (`muvera_colbert` only) |
-| `t_embed_ms` | sum of the three embedding buckets |
+| `t_embed_dense_ms` | client-side dense query embedding (`dense`, `late_interaction_rescore`, `cross_encoder`) |
+| `t_embed_bm25_ms` | client-side BM25 query tokenisation (`bm25`, `bm25_late_interaction_rescore`, `bm25_cross_encoder`) |
+| `t_embed_late_interaction_ms` | client-side late-interaction query embedding (the three `*_late_interaction_rescore` arms) |
+| `t_embed_muvera_ms` | the MUVERA FDE transform of the late-interaction query tokens (`muvera_late_interaction_rescore` only) |
+| `t_embed_ms` | sum of the four embedding buckets |
 | `t_qdrant_ms` | client-observed round trip, summed across all Qdrant calls an arm makes |
 | `t_qdrant_server_ms` | Qdrant's own self-reported processing time for the same calls |
 | `t_qdrant_overhead_ms` | `t_qdrant_ms - t_qdrant_server_ms` — transport + response deserialization |
-| `t_rerank_ms` | client-side reranking (non-zero only for `cross_encoder`) |
+| `t_rerank_ms` | client-side reranking (non-zero only for the two cross-encoder arms) |
 | `t_total_ms` | `t_embed_ms + t_qdrant_ms + t_rerank_ms` |
 
 Each arm embeds its own query, so an arm's `t_embed_ms` is what a deployment running
@@ -446,10 +480,10 @@ that cost different things:
 | Field | What it is |
 |---|---|
 | `storage` | the fp32 vectors themselves |
-| `index` | the HNSW graph for that vector (≈0 for ColBERT, which has `m=0` and no graph) |
+| `index` | the HNSW graph for that vector (≈0 for `late_interaction`, which has `m=0` and no graph) |
 | `payload` | `doc_id` + `text`, reported as its own component rather than estimated |
 | `payload_index`, `id_tracker` | the remaining accounted-for structures |
-| `n_token_vectors` | ColBERT token-vector total, since "per million points" is ambiguous by ~100× on a multivector collection |
+| `n_token_vectors` | late-interaction token-vector total, since "per million points" is ambiguous by ~100× on a multivector collection |
 
 Each is reported in four dimensions: `disk_bytes`, `ram_bytes` (non-evictable),
 `cached_bytes` (page cache, Unix only), and `expected_cache_bytes` (what Qdrant wants
@@ -501,8 +535,8 @@ run_dataset(dataset):
 ```
 
 - **`units`** — the flat list of (arm, depth) pairs to run. Non-sweeping arms (e.g.
-  `dense`) contribute one unit with `depth=None`; sweeping arms (`colbert_rescore`,
-  `muvera_colbert`, `cross_encoder`) contribute one unit per
+  `dense`) contribute one unit with `depth=None`; sweeping arms (`late_interaction_rescore`,
+  `muvera_late_interaction_rescore`, `cross_encoder`) contribute one unit per
   configured depth. `build_plan` also applies an initial shuffle, but that ordering is
   superseded by the per-query reshuffle below — it only matters for the plan digest
   used to validate a resume.
@@ -556,7 +590,7 @@ records already on disk unless you pass `--no-resume`.
 python -m src.cli run --dataset all              # the four-dataset default set, ~10.4h
 python -m src.cli run --dataset quora            # Quora on its own, capped at 500 queries
 python -m src.cli run --dataset nfcorpus
-python -m src.cli run --dataset all --arms dense,colbert_rescore
+python -m src.cli run --dataset all --arms dense,late_interaction_rescore
 python -m src.cli run --dataset fiqa --dense-model BAAI/bge-base-en-v1.5
 ```
 
@@ -580,10 +614,11 @@ are never pooled across datasets, so there is nothing for a separate run to bias
 | `--measure-memory` / `--no-measure-memory` | on | read Qdrant's per-vector memory accounting off the built collection |
 | `--resume-ingestion` | off | reuse a matching existing collection and re-send only missing points, instead of wiping storage and rebuilding — use after a crash mid-upload |
 | `--allow-unverified-baseline` | off | proceed when the dense model's Gate 1 reference is marked `verified: false` (it is verified by default, so this is only needed after overriding the model) |
-| `--dense-model` | config | override the baseline dense model every arm reranks |
+| `--dense-model` | config | override the dense first-stage model the dense-family arms rerank |
 | `--dense-model-dim` | auto | dimension of `--dense-model`, if FastEmbed's registry can't resolve it |
 | `--analyse` / `--no-analyse` | on | aggregate after the run completes |
 | `--allow-disk-bound` | off | run even when a collection's working set exceeds 80% of Qdrant's memory; its large-vector arms are then measured on disk |
+| `--results-dir` | `results` | write raw records, aggregates, query samples and the manifest under another directory, so a new run never touches a recorded one; the embedding cache is shared |
 | `--allow-partial` | off | aggregate even if some `(arm, depth)` units have incomplete records — for inspecting an interrupted run, never for a result you intend to trust |
 
 `aggregate` accepts the same `--allow-partial` flag.
@@ -595,7 +630,8 @@ python -m src.cli aggregate --dataset nfcorpus
 ```
 
 Rebuilds every CSV from the raw JSONL already on disk. Use this after tweaking
-analysis code, or to regenerate output that was deleted.
+analysis code, or to regenerate output that was deleted. Takes the same
+`--results-dir` as `run`.
 
 ### `memory` — memory phase only
 
@@ -612,15 +648,15 @@ accounting off it, and prints the record as JSON.
 python -m src.cli calibrate-muvera --dataset nfcorpus --n-docs 2000 --n-queries 25
 ```
 
-Required before trusting any `muvera_colbert` number — see
+Required before trusting any `muvera_late_interaction_rescore` number — see
 [Known limitations](#known-limitations). Compares FDE-prefetch recall against exact
-`max_sim` and against a trivial bag-of-tokens baseline on real ColBERT embeddings.
+`max_sim` and against a trivial bag-of-tokens baseline on real late-interaction embeddings.
 
 ### `plan` — print the execution plan, touch nothing
 
 ```bash
 python -m src.cli plan --dataset nfcorpus
-python -m src.cli plan --dataset quora --arms colbert_rescore,muvera_colbert
+python -m src.cli plan --dataset quora --arms late_interaction_rescore,muvera_late_interaction_rescore
 ```
 
 Prints the shuffled `(arm, depth)` unit list and every arm exclusion with its reason.
@@ -653,13 +689,14 @@ details, and each changes what a number means.
   measured on disk.
 - **Memory and latency describe the same collection, but memory is not additive per
   arm.** Both come from the one collection per dataset, so they describe a single
-  deployment. But several arms share a vector (`colbert_rescore` and `cross_encoder`
-  both read `dense`), so summing per-arm memory columns would double-count. The
+  deployment. But several arms share a vector (`late_interaction_rescore` and `cross_encoder`
+  both read `dense`; both dense- and BM25-first-stage late-interaction arms read `late_interaction`), so summing per-arm memory
+  columns would double-count. The
   per-vector figures are the real quantities; the per-arm columns are a convenience view.
 - **The absolute `dense` latency is higher than a dense-only deployment would see.**
-  Every arm queries the collection that holds all three representations, which is what
+  Every arm queries the collection that holds all four representations, which is what
   makes arm-to-arm comparison clean, but it means the baseline's absolute number carries
-  the cost of sharing a collection with ColBERT and MUVERA.
+  the cost of sharing a collection with the late-interaction and MUVERA vectors.
 - **Everything runs on a single shard.** Multi-shard behaviour, including fusion
   divergence across shards, is out of scope.
 - **Non-monotonic depth curves are preserved, not smoothed.** Reranking is not
@@ -685,11 +722,11 @@ and a live Qdrant.
 
 | Gate | Checks | Status |
 |---|---|---|
-| **1** `test_gate1_baseline` | The `dense` baseline reproduces the model's published NDCG@10 on NFCorpus over all 323 judged queries. Catches broken qrels parsing, ID mapping, document construction, or metric calls. | ✅ passes |
+| **1** `test_gate1_baseline` | Each baseline reproduces a published NDCG@10 on NFCorpus over all 323 judged queries: `dense` the model card's figure, `bm25` the BEIR paper's. Also checks that the measured BM25 `avg_len` is the length FastEmbed normalises by. Catches broken qrels parsing, ID mapping, document construction, encoder setup, or metric calls. | ✅ `dense` passes; `bm25` not yet run against Qdrant |
 | **2** `test_gate2_arms_distinct` | No two arms return identical rankings, and every registered arm either runs or is excluded with a stated reason. Catches an arm silently collapsing into its own prefetch. | ✅ passes |
 | **3** `test_gate3_hnsw_variance` | Two independent index builds of the same vectors agree within 0.005 NDCG@10. Establishes the noise floor below which no arm-to-arm difference is interpretable. | ✅ passes |
 | **4** `test_gate4_unattended` | The pipeline runs end to end on a 5-query, 2-depth subset, resumes idempotently, and aggregates into its artefacts. Catches resume bugs (double-counting) and missing output. | ✅ scoped to a subset |
-| **MUVERA** `test_muvera_calibration` | The FDE prefetch beats a bag-of-tokens baseline and recovers ≥80% of the exact ColBERT top-10 at the deepest sweep depth. Without it, `muvera_colbert` would measure its own recall ceiling rather than reranking quality. | ✅ passes |
+| **MUVERA** `test_muvera_calibration` | The FDE prefetch beats a bag-of-tokens baseline and recovers ≥80% of the exact late-interaction top-10 at the deepest sweep depth. Without it, `muvera_late_interaction_rescore` would measure its own recall ceiling rather than reranking quality. | ✅ passes |
 
 **On Gate 1's published-vs-measured gap.** The gate passes with measured NDCG@10 =
 **0.3314** against the published **0.34305** (Δ0.0117), inside a deliberately widened
@@ -701,9 +738,14 @@ the loader already follows BEIR's `{title} {text}` convention. A −3.4% relativ
 is what a quantized encoder predicts; a genuine qrels or ID-mapping fault would drop NDCG
 far more, which is what keeps the widened tolerance meaningful rather than vacuous.
 
+**On Gate 1 for `bm25`.** The reference is BM25 on NFCorpus from the BEIR paper
+(0.325, Elasticsearch), tolerance 0.02. An offline exact-scoring check of this exact
+setup (FastEmbed tokenizer, `k`, `b`, measured `avg_len`, Qdrant's IDF formula) gives
+0.3275 on all 323 judged queries; the gate re-measures it through Qdrant.
+
 MUVERA's calibration is in place: it uses fastembed's official `Muvera` postprocessor and
 is validated on the full NFCorpus corpus (see
-[Known limitations](#known-limitations)). `muvera_colbert` is still gated per dataset —
+[Known limitations](#known-limitations)). `muvera_late_interaction_rescore` is still gated per dataset —
 `resolve_arms` excludes it on any dataset without a passing calibration artifact or an
 explicit `muvera.calibrated: true` override, so it cannot silently run uncalibrated even
 if you add a new dataset later.
@@ -754,7 +796,7 @@ Open items worth knowing before you lean on a number:
   wraps fastembed's official `Muvera` postprocessor (`fastembed>=0.7.2`), the reference
   implementation. Calibrated on the full NFCorpus corpus (3,633 docs,
   80 queries): the FDE beats a bag-of-tokens baseline at every depth (recall@10: 0.352
-  vs 0.161; recall@500: 0.852 vs 0.709). `muvera_colbert` is gated per dataset —
+  vs 0.161; recall@500: 0.852 vs 0.709). `muvera_late_interaction_rescore` is gated per dataset —
   `resolve_arms` excludes it unless `muvera.calibrated: true` or a passing
   `{dataset}__muvera_calibration.json` artifact exists — so adding a new dataset
   doesn't silently inherit NFCorpus's calibration. Re-run `calibrate-muvera` for any

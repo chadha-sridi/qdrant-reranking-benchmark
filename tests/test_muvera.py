@@ -18,7 +18,7 @@ from src.muvera import build_muvera, chamfer_similarity, matrices_digest
 @pytest.fixture
 def model() -> MuveraModel:
     return MuveraModel(
-        source_tokens="colbert",
+        source_tokens="late_interaction",
         k_sim=5,
         n_reps=20,
         d_proj=16,

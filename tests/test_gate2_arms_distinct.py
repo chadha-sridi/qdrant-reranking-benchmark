@@ -3,9 +3,9 @@
 An arm that silently falls back to its prefetch ranking looks exactly like "reranking
 didn't help", which is the wrong conclusion drawn from a bug.
 
-The gate takes no exemptions. Every arm reranks the dense baseline (or a prefetch
-derived from it) with a genuinely different mechanism, so if any pair ever needs an
-exemption that is itself worth investigating rather than suppressing.
+The gate takes no exemptions. Every arm reranks a baseline's candidates (or generates
+its own) with a genuinely different mechanism, so if any pair ever needs an exemption
+that is itself worth investigating rather than suppressing.
 """
 
 from __future__ import annotations
@@ -60,4 +60,4 @@ def test_gate2_every_declared_arm_is_accounted_for(cfg):
     accounted = {arm.name for arm in arms} | set(exclusions)
     missing = set(REGISTRY) - accounted
     assert not missing, f"arms neither run nor excluded: {sorted(missing)}"
-    assert len(REGISTRY) == 4, f"expected 4 registered arms, found {len(REGISTRY)}"
+    assert len(REGISTRY) == 7, f"expected 7 registered arms, found {len(REGISTRY)}"

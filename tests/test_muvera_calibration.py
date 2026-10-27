@@ -1,4 +1,4 @@
-"""MUVERA calibration on real ColBERT embeddings.
+"""MUVERA calibration on real late-interaction embeddings.
 
 MUVERA is a prefetch, so the question that matters is whether the exact max_sim top-k
 survives into the candidate set at each sweep depth. This cannot be answered on synthetic
@@ -6,8 +6,8 @@ vectors: on isotropic random tokens the FDE cannot beat a plain summed-token dot
 at any parameter setting, so a synthetic test would either pass vacuously or fail
 misleadingly.
 
-This gate must pass before any `muvera_colbert` number is published. It is marked slow
-because it needs the real ColBERT model.
+This gate must pass before any `muvera_late_interaction_rescore` number is published. It
+is marked slow because it needs the real late-interaction model.
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ def calibration(cfg, nfcorpus, encoders, tmp_path_factory):
     query_ids = sorted(nfcorpus.eval_queries())[:N_QUERIES]
     queries = [nfcorpus.queries[qid] for qid in query_ids]
 
-    doc_tokens = encoders.embed_docs_colbert(docs)
-    query_tokens = [encoders.embed_query_colbert(text) for text in queries]
+    doc_tokens = encoders.embed_docs_late_interaction(docs)
+    query_tokens = [encoders.embed_query_late_interaction(text) for text in queries]
 
     result = calibrate(
         encoders.muvera,
@@ -69,7 +69,7 @@ def test_muvera_prefetch_recall_is_usable_at_sweep_depths(cfg, calibration):
     assert recall >= 0.8, (
         f"MUVERA calibration FAILED: at the deepest sweep depth ({deepest}) the FDE "
         f"prefetch recovers only {recall:.2%} of the exact max_sim top-"
-        f"{cfg.run.execution.final_limit}. `muvera_colbert` would measure the FDE's "
-        "recall ceiling rather than the value of ColBERT rescoring, and its curve would "
+        f"{cfg.run.execution.final_limit}. `muvera_late_interaction_rescore` would measure the FDE's "
+        "recall ceiling rather than the value of late-interaction rescoring, and its curve would "
         "be uninterpretable. Retune the FDE or exclude the arm."
     )

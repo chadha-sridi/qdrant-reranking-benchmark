@@ -3,8 +3,8 @@
 The split between client-side and server-side time is the central finding of the
 project, so each component is accumulated separately and never summed before storage.
 
-Query embedding is bucketed per encoder (`dense`, `colbert`, `muvera`) so the encoders
-can be compared directly rather than only inferred from arm-vs-arm differences;
+Query embedding is bucketed per encoder (`dense`, `bm25`, `late_interaction`,
+`muvera`) so the encoders can be compared directly rather than only inferred from arm-vs-arm differences;
 `t_embed_ms` is their sum. `t_qdrant_ms` is the sum of all Qdrant round trips an arm
 makes, issued serially.
 
@@ -22,16 +22,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
 
-# One bucket per query encoder. `muvera` is the FDE transform applied to the ColBERT
-# token vectors, not a model call of its own, so an arm that uses it always pays
-# `colbert` as well.
-EMBED_STAGES = ("dense", "colbert", "muvera")
+# One bucket per query encoder. `muvera` is the FDE transform applied to the
+# late-interaction token vectors, not a model call of its own, so an arm that uses it
+# always pays `late_interaction` as well.
+EMBED_STAGES = ("dense", "bm25", "late_interaction", "muvera")
 
 
 @dataclass
 class QueryTimers:
     t_embed_dense_ms: float = 0.0
-    t_embed_colbert_ms: float = 0.0
+    t_embed_bm25_ms: float = 0.0
+    t_embed_late_interaction_ms: float = 0.0
     t_embed_muvera_ms: float = 0.0
     t_qdrant_ms: float = 0.0
     t_rerank_ms: float = 0.0
@@ -65,7 +66,7 @@ class QueryTimers:
 
     @property
     def t_embed_ms(self) -> float:
-        return self.t_embed_dense_ms + self.t_embed_colbert_ms + self.t_embed_muvera_ms
+        return sum(getattr(self, f"t_embed_{stage}_ms") for stage in EMBED_STAGES)
 
     @property
     def t_total_ms(self) -> float:
@@ -85,7 +86,8 @@ class QueryTimers:
         return {
             "t_embed_ms": round(self.t_embed_ms, 4),
             "t_embed_dense_ms": round(self.t_embed_dense_ms, 4),
-            "t_embed_colbert_ms": round(self.t_embed_colbert_ms, 4),
+            "t_embed_bm25_ms": round(self.t_embed_bm25_ms, 4),
+            "t_embed_late_interaction_ms": round(self.t_embed_late_interaction_ms, 4),
             "t_embed_muvera_ms": round(self.t_embed_muvera_ms, 4),
             "t_qdrant_ms": round(self.t_qdrant_ms, 4),
             "t_rerank_ms": round(self.t_rerank_ms, 4),

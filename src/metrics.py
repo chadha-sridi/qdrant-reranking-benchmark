@@ -25,7 +25,8 @@ QUALITY_METRICS = ("ndcg@10", "recall@10")
 LATENCY_COMPONENTS = (
     "t_embed_ms",
     "t_embed_dense_ms",
-    "t_embed_colbert_ms",
+    "t_embed_bm25_ms",
+    "t_embed_late_interaction_ms",
     "t_embed_muvera_ms",
     "t_qdrant_ms",
     "t_qdrant_server_ms",
@@ -294,6 +295,8 @@ def aggregate(
             "dataset": dataset,
             "arm": arm,
             "depth": depth_value,
+            # The baseline arm this row's quality gain is measured against.
+            "baseline": meta.get("baseline"),
             "n_queries": len(run),
             **quality,
             "recall_at_pool_depth": pool_recall(group_records, qrels),

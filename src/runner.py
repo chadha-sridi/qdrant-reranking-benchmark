@@ -84,7 +84,8 @@ def plan_digest(cfg: Config, bundle: LoadedDataset, units: Sequence[Unit]) -> st
             "execution": cfg.run.execution.model_dump(),
             "models": {
                 "dense": cfg.models.dense.name,
-                "colbert": cfg.models.colbert.name,
+                "bm25": cfg.models.bm25.model_dump(exclude={"reference"}),
+                "late_interaction": cfg.models.late_interaction.name,
                 "cross_encoder": cfg.models.cross_encoder.name,
                 "muvera": cfg.models.muvera.model_dump(),
             },

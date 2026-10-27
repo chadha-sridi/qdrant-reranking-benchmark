@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 import numpy as np
+from qdrant_client import models
 
 from .config import Config, ModelsConfig
 from .muvera import build_muvera
@@ -30,7 +31,9 @@ class Encoders:
     models: ModelsConfig
     muvera_seed: int
     _dense: object | None = field(default=None, repr=False)
-    _colbert: object | None = field(default=None, repr=False)
+    _bm25: object | None = field(default=None, repr=False)
+    _bm25_docs: object | None = field(default=None, repr=False)
+    _late_interaction: object | None = field(default=None, repr=False)
     _cross: object | None = field(default=None, repr=False)
     _muvera: object | None = field(default=None, repr=False)
 
@@ -43,12 +46,30 @@ class Encoders:
         return self._dense
 
     @property
-    def colbert(self):
-        if self._colbert is None:
+    def bm25(self):
+        """BM25 for queries. A query's term weights are all 1, independent of avg_len."""
+        if self._bm25 is None:
+            self._bm25 = self._build_bm25(avg_len=None)
+        return self._bm25
+
+    def _build_bm25(self, avg_len: float | None):
+        from fastembed import SparseTextEmbedding
+
+        cfg = self.models.bm25
+        extra = {} if avg_len is None else {"avg_len": avg_len}
+        return SparseTextEmbedding(
+            model_name=cfg.name, k=cfg.k, b=cfg.b, language=cfg.language, **extra
+        )
+
+    @property
+    def late_interaction(self):
+        if self._late_interaction is None:
             from fastembed import LateInteractionTextEmbedding
 
-            self._colbert = LateInteractionTextEmbedding(model_name=self.models.colbert.name)
-        return self._colbert
+            self._late_interaction = LateInteractionTextEmbedding(
+                model_name=self.models.late_interaction.name
+            )
+        return self._late_interaction
 
     @property
     def cross(self):
@@ -63,7 +84,7 @@ class Encoders:
         """fastembed's Muvera postprocessor."""
         if self._muvera is None:
             self._muvera = build_muvera(
-                self.models.muvera, self.models.colbert.dim, self.muvera_seed
+                self.models.muvera, self.models.late_interaction.dim, self.muvera_seed
             )
         return self._muvera
 
@@ -72,9 +93,15 @@ class Encoders:
     def embed_query_dense(self, text: str) -> np.ndarray:
         return np.asarray(next(iter(self.dense.query_embed(text))), dtype=np.float32)
 
-    def embed_query_colbert(self, text: str) -> np.ndarray:
-        tokens = np.asarray(next(iter(self.colbert.query_embed(text))), dtype=np.float32)
-        limit = self.models.colbert.query_max_tokens
+    def embed_query_bm25(self, text: str) -> models.SparseVector:
+        embedding = next(iter(self.bm25.query_embed(text)))
+        return models.SparseVector(
+            indices=embedding.indices.tolist(), values=embedding.values.tolist()
+        )
+
+    def embed_query_late_interaction(self, text: str) -> np.ndarray:
+        tokens = np.asarray(next(iter(self.late_interaction.query_embed(text))), dtype=np.float32)
+        limit = self.models.late_interaction.query_max_tokens
         return tokens[:limit]
 
     # ------------------------------------------------------------------ documents
@@ -83,11 +110,38 @@ class Encoders:
         out = list(self.dense.embed(list(texts), batch_size=batch_size))
         return np.asarray(out, dtype=np.float32)
 
-    def embed_docs_colbert(self, texts: Sequence[str], batch_size: int = 16) -> list[np.ndarray]:
-        limit = self.models.colbert.doc_max_tokens
+    def bm25_avg_len(self, texts: Sequence[str]) -> float:
+        """Mean document length in BM25 terms, the corpus statistic BM25 normalises by.
+
+        Counted with the encoder's own preprocessing (punctuation, stopwords, length cap,
+        stemming), so it measures exactly the token count `_term_frequency` divides by.
+        FastEmbed exposes no public call for this, so Gate 1's
+        `test_gate1_bm25_avg_len_is_the_length_fastembed_normalises_by` pins that these
+        private helpers still agree with it.
+        """
+        from fastembed.common.utils import remove_non_alphanumeric
+
+        model = self.bm25.model
+        lengths = [
+            len(model._stem(model.tokenizer.tokenize(remove_non_alphanumeric(text))))
+            for text in texts
+        ]
+        return float(np.mean(lengths)) if lengths else 0.0
+
+    def embed_docs_bm25(self, texts: Sequence[str], *, avg_len: float) -> list[models.SparseVector]:
+        """BM25 term weights per document, normalised by the corpus's measured avg_len."""
+        if self._bm25_docs is None or self._bm25_docs.model.avg_len != avg_len:
+            self._bm25_docs = self._build_bm25(avg_len=avg_len)
+        return [
+            models.SparseVector(indices=e.indices.tolist(), values=e.values.tolist())
+            for e in self._bm25_docs.embed(list(texts))
+        ]
+
+    def embed_docs_late_interaction(self, texts: Sequence[str], batch_size: int = 16) -> list[np.ndarray]:
+        limit = self.models.late_interaction.doc_max_tokens
         return [
             np.asarray(tokens, dtype=np.float32)[:limit]
-            for tokens in self.colbert.embed(list(texts), batch_size=batch_size)
+            for tokens in self.late_interaction.embed(list(texts), batch_size=batch_size)
         ]
 
     # -------------------------------------------------------------------- pinning
@@ -195,9 +249,9 @@ class EmbeddingCache:
         _atomic_write(self._data_path(key, ".dense.npy"), _write)
         self._write_meta(key, {**meta, "kind": "dense", "shape": list(vectors.shape)})
 
-    # --- colbert (ragged) --------------------------------------------------
+    # --- late_interaction (ragged) --------------------------------------------------
 
-    def load_colbert(self, key: str) -> list[np.ndarray] | None:
+    def load_late_interaction(self, key: str) -> list[np.ndarray] | None:
         if self._read_meta(key, context=f"colbert cache {key}") is None:
             return None
         path = self._data_path(key, ".colbert.npz")
@@ -209,7 +263,7 @@ class EmbeddingCache:
             flat[offsets[i] : offsets[i + 1]].reshape(-1, dim) for i in range(len(offsets) - 1)
         ]
 
-    def save_colbert(self, key: str, matrices: list[np.ndarray], meta: dict) -> None:
+    def save_late_interaction(self, key: str, matrices: list[np.ndarray], meta: dict) -> None:
         dim = matrices[0].shape[1] if matrices else 0
         offsets = np.zeros(len(matrices) + 1, dtype=np.int64)
         for i, mat in enumerate(matrices):

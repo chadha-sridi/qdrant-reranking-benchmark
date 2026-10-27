@@ -29,10 +29,22 @@ from src.timing import EMBED_STAGES, QueryTimers
 
 def test_config_loads_and_validates():
     cfg = load_config()
-    assert cfg.models.colbert.hnsw_m == 0, "multivector HNSW must be disabled"
+    assert cfg.models.late_interaction.hnsw_m == 0, "multivector HNSW must be disabled"
     muvera = cfg.models.muvera
     assert muvera.dim == muvera.n_reps * muvera.n_partitions * muvera.d_proj
     assert cfg.run.execution.final_limit <= min(cfg.run.execution.depths)
+
+
+def test_results_dir_moves_every_run_output_but_shares_the_embedding_cache():
+    cfg = load_config()
+    moved = cfg.with_results_dir("results_new").paths
+    root = cfg.root
+    assert moved["results"] == root / "results_new"
+    assert moved["raw"] == root / "results_new" / "raw"
+    assert moved["agg"] == root / "results_new" / "agg"
+    assert moved["queries"] == root / "results_new" / "queries"
+    assert moved["manifest"] == root / "results_new" / "manifest.json"
+    assert moved["cache"] == cfg.paths["cache"]
 
 
 def test_muvera_calibration_flag_has_a_reason_recorded():
@@ -71,11 +83,11 @@ def test_execution_config_rejects_depth_below_final_limit():
         )
 
 
-def test_colbert_config_rejects_nonzero_m():
-    from src.config import ColbertModel
+def test_late_interaction_config_rejects_nonzero_m():
+    from src.config import LateInteractionModel
 
     with pytest.raises(ValueError, match="hnsw_m must be 0"):
-        ColbertModel(
+        LateInteractionModel(
             name="x", dim=128, distance="cosine", doc_max_tokens=300,
             query_max_tokens=32, hnsw_m=16, comparator="max_sim",
         )
@@ -145,31 +157,53 @@ def test_enabled_datasets_are_ordered_smallest_first():
 # -------------------------------------------------------------------------- arms
 
 
-def test_registry_has_four_arms_and_no_hybrid_or_formula_arms():
-    """Every registered arm reranks the one unified dense baseline.
+def test_registry_has_two_baselines_their_rerankers_and_no_fusion_arms():
+    """Two first stages, each with its own rerankers.
 
-    Hybrid-fusion arms (bm25/rrf/rrf_weighted/dbsf) and formula_rrf are out of scope:
-    they combine retrievers rather than rescore a candidate set, so they are not
-    reranking under this benchmark's scope.
+    Fusion arms (rrf/rrf_weighted/dbsf) and formula_rrf are out of scope: they combine
+    retrievers rather than rescore a candidate set, so they are not reranking under
+    this benchmark's scope.
     """
     from src.arms import REGISTRY
 
     assert set(REGISTRY) == {
-        "dense", "colbert_rescore", "muvera_colbert", "cross_encoder",
+        "dense", "late_interaction_rescore", "muvera_late_interaction_rescore", "cross_encoder",
+        "bm25", "bm25_late_interaction_rescore", "bm25_cross_encoder",
     }
-    assert "formula_rrf" not in REGISTRY
-    # Every arm except the baseline sweeps candidate depth.
-    assert {a.name for a in REGISTRY.values() if a.sweeps_depth} == {
-        "colbert_rescore", "cross_encoder", "muvera_colbert",
-    }
+    assert not {"rrf", "rrf_weighted", "dbsf", "formula_rrf"} & set(REGISTRY)
+    # Every arm except the baselines sweeps candidate depth.
+    baselines = {a.name for a in REGISTRY.values() if a.group == "baseline"}
+    assert baselines == {"dense", "bm25"}
+    assert {a.name for a in REGISTRY.values() if not a.sweeps_depth} == baselines
+
+
+def test_every_arm_is_measured_against_a_baseline_it_shares_a_first_stage_with():
+    """An arm's `baseline` must be a baseline arm, and a reranker must read that
+    baseline's vector: its gain is attributable to reranking only if both start from
+    the same candidates. `muvera_late_interaction_rescore` makes its own candidates and is
+    the one arm compared across first stages."""
+    from src.arms import REGISTRY
+
+    for arm in REGISTRY.values():
+        baseline = REGISTRY[arm.baseline]
+        assert baseline.group == "baseline", arm.name
+        if arm.group == "baseline":
+            assert arm.baseline == arm.name
+        elif arm.name != "muvera_late_interaction_rescore":
+            assert set(baseline.requires) <= set(arm.requires), arm.name
+            prefix = "" if arm.baseline == "dense" else f"{arm.baseline}_"
+            assert arm.name.startswith(prefix), arm.name
 
 
 def test_pool_doc_ids_declared_only_where_cheap_or_meaningful():
     """dense has no separate pool. The other three expose one."""
     from src.arms import REGISTRY
 
-    exposes_pool = {"colbert_rescore", "muvera_colbert", "cross_encoder"}
-    no_pool = {"dense"}
+    exposes_pool = {
+        "late_interaction_rescore", "muvera_late_interaction_rescore", "cross_encoder",
+        "bm25_late_interaction_rescore", "bm25_cross_encoder",
+    }
+    no_pool = {"dense", "bm25"}
     assert exposes_pool | no_pool == set(REGISTRY)
 
 
@@ -223,16 +257,14 @@ def test_pool_doc_ids_capture_is_untimed_and_config_gated():
     assert len(calls) == 1, "disabled must not issue the call at all"
 
 
-def test_resolve_arms_matches_the_four_arm_default_set():
+def test_resolve_arms_matches_the_default_set():
     cfg = load_config()
-    from src.arms import resolve_arms
+    from src.arms import REGISTRY, resolve_arms
 
     arms, exclusions = resolve_arms(cfg, "nfcorpus")
     assert not exclusions, f"unexpected exclusions: {exclusions}"
     assert {a.name for a in arms} == set(cfg.run.arms.enabled)
-    assert set(cfg.run.arms.enabled) == {
-        "dense", "colbert_rescore", "muvera_colbert", "cross_encoder",
-    }
+    assert set(cfg.run.arms.enabled) == set(REGISTRY)
 
 
 def test_per_dataset_depths_fall_back_to_the_global_sweep():
@@ -275,8 +307,8 @@ def test_resolve_arms_excludes_by_missing_representation():
             )
         }
     )
-    _, exclusions = resolve_arms(trimmed, "nfcorpus", include=["dense", "colbert_rescore"])
-    assert "colbert_rescore" in exclusions
+    _, exclusions = resolve_arms(trimmed, "nfcorpus", include=["dense", "late_interaction_rescore"])
+    assert "late_interaction_rescore" in exclusions
 
 
 # ------------------------------------------------------------------ query transport
@@ -303,12 +335,12 @@ def test_query_message_accepts_arm_vocabulary_and_rejects_unknown_arguments():
     msg = _query_message(
         ctx,
         prefetch=[models.Prefetch(query=[0.1, 0.2], using="dense", limit=50)],
-        query=[[0.1, 0.2], [0.3, 0.4]],           # multivector, as colbert arms send
-        using="colbert", limit=10, with_payload=["doc_id"],
+        query=[[0.1, 0.2], [0.3, 0.4]],           # multivector, as late_interaction arms send
+        using="late_interaction", limit=10, with_payload=["doc_id"],
         params=models.SearchParams(hnsw_ef=128),
     )
     assert msg.collection_name == "c"
-    assert msg.using == "colbert"
+    assert msg.using == "late_interaction"
     assert msg.limit == 10
     assert len(msg.prefetch) == 1
     assert msg.params.hnsw_ef == 128
@@ -469,6 +501,69 @@ def test_point_from_chunk_uses_global_index_for_the_document_and_local_index_for
     assert point.vector["dense"] == [7.0]  # chunk_vectors[local_i=2] == arange(5,10)[2] == 7
 
 
+def test_bm25_is_a_sparse_vector_with_idf_applied_by_qdrant():
+    """FastEmbed's BM25 weights carry no IDF; without the modifier the baseline would be
+    plain saturated term frequency, not BM25."""
+    from qdrant_client import models
+
+    from src.indexing import sparse_vectors_config
+
+    config = sparse_vectors_config(["dense", "bm25", "late_interaction"])
+    assert set(config) == {"bm25"}
+    assert config["bm25"].modifier == models.Modifier.IDF
+    assert sparse_vectors_config(["dense", "late_interaction"]) == {}
+
+
+def test_point_carries_the_bm25_sparse_vector_for_its_own_document():
+    from qdrant_client import models
+
+    from src.datasets import Document, IdMap
+    from src.indexing import DocumentVectors, _point_from_chunk
+
+    doc_ids = [f"doc{i}" for i in range(4)]
+
+    class FakeBundle:
+        documents = [Document(doc_id=d, text=d) for d in doc_ids]
+        id_map = IdMap.build("fake", doc_ids)
+
+    sparse = [models.SparseVector(indices=[i], values=[float(i)]) for i in range(2, 4)]
+    point = _point_from_chunk(FakeBundle(), DocumentVectors(bm25=sparse), ["bm25"], 3, 2)
+    assert point.payload["doc_id"] == "doc3"
+    assert point.vector == {"bm25": sparse[1]}
+
+
+def test_collection_without_the_bm25_vector_is_rebuilt_not_resumed():
+    """Resuming into a collection built before BM25 existed would upsert points with a
+    sparse vector the collection has no slot for."""
+    from types import SimpleNamespace
+
+    from qdrant_client import models
+
+    from src.indexing import _config_matches, sparse_vectors_config, vectors_config
+
+    cfg = load_config()
+    spec = cfg.datasets.get("nfcorpus")
+    reps = spec.representations
+    assert "bm25" in reps
+
+    def client_with(sparse):
+        params = SimpleNamespace(vectors=vectors_config(cfg, spec, reps), sparse_vectors=sparse)
+        info = SimpleNamespace(config=SimpleNamespace(params=params))
+        return SimpleNamespace(get_collection=lambda name: info)
+
+    assert _config_matches(client_with(sparse_vectors_config(reps)), cfg, spec, "c", reps)
+    assert not _config_matches(client_with(None), cfg, spec, "c", reps)
+    no_idf = {"bm25": models.SparseVectorParams()}
+    assert not _config_matches(client_with(no_idf), cfg, spec, "c", reps)
+
+
+def test_first_stage_query_rejects_an_unknown_first_stage():
+    from src.arms import ArmError, first_stage_query
+
+    with pytest.raises(ArmError, match="unknown first stage"):
+        first_stage_query(None, QueryTimers(), "splade", "q")
+
+
 def test_chunk_bounds_covers_the_corpus_exactly_once():
     from src.indexing import _chunk_bounds
 
@@ -551,7 +646,7 @@ def test_upsert_batch_is_capped_below_qdrant_payload_limit():
     from src.indexing import DocumentVectors, safe_batch_size
 
     cfg = load_config()
-    reps = ["dense", "colbert", "muvera"]
+    reps = ["dense", "late_interaction", "muvera"]
     vectors = DocumentVectors(n_token_vectors=12 * 200)
 
     http = safe_batch_size(_with_grpc(cfg, False), vectors, reps, 200)
@@ -670,11 +765,11 @@ def test_timers_accumulate_independently():
 
 def test_embed_time_is_bucketed_per_encoder_and_summed():
     """Each encoder's query-side cost is recorded on its own; t_embed_ms is their sum."""
-    timers = QueryTimers(t_embed_dense_ms=1.0, t_embed_colbert_ms=2.0, t_embed_muvera_ms=4.0)
+    timers = QueryTimers(t_embed_dense_ms=1.0, t_embed_late_interaction_ms=2.0, t_embed_muvera_ms=4.0)
     assert timers.t_embed_ms == pytest.approx(7.0)
     payload = timers.as_dict()
     assert payload["t_embed_dense_ms"] == 1.0
-    assert payload["t_embed_colbert_ms"] == 2.0
+    assert payload["t_embed_late_interaction_ms"] == 2.0
     assert payload["t_embed_muvera_ms"] == 4.0
     assert payload["t_embed_ms"] == pytest.approx(7.0)
     assert payload["t_total_ms"] == pytest.approx(7.0)
@@ -762,7 +857,7 @@ def test_timers_record_time_even_on_exception():
 
 def test_unit_slug_uses_none_not_zero_for_non_sweeping_arms():
     assert unit_slug("nfcorpus", "dense", None) == "nfcorpus__dense__depth-none"
-    assert unit_slug("nfcorpus", "colbert_rescore", 100) == "nfcorpus__colbert_rescore__depth-100"
+    assert unit_slug("nfcorpus", "late_interaction_rescore", 100) == "nfcorpus__late_interaction_rescore__depth-100"
 
 
 def test_raw_writer_appends_and_resume_reads_back(tmp_path):

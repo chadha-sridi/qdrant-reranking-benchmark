@@ -1,4 +1,4 @@
-"""Quick end-to-end smoke test: nfcorpus, dense + colbert_rescore.
+"""Quick end-to-end smoke test: nfcorpus, dense + late_interaction_rescore.
 
 Trims query count, depth sweep, and repeats so the whole pipeline finishes in a couple
 minutes. Writes to results_smoke/ so it can never collide with a real run's output.
@@ -65,14 +65,16 @@ def main() -> None:
         f"queries ({len(bundle.eval_ids)} evaluated / {len(bundle.warmup_ids)} warmup)"
     )
 
-    # Only dense + colbert vectors are needed for these arms — skips muvera embedding
-    # entirely, which is most of the time cost.
-    collection = build_collection(cfg, bundle, encoders, controller, representations=["dense", "colbert"])
+    # Only dense + late_interaction vectors are needed for these arms — skips muvera
+    # embedding entirely, which is most of the time cost.
+    collection = build_collection(
+        cfg, bundle, encoders, controller, representations=["dense", "late_interaction"]
+    )
     log(f"collection built: {collection}")
 
     summary = run_dataset(
         cfg, bundle, encoders, collection,
-        include_arms=["dense", "colbert_rescore"],
+        include_arms=["dense", "late_interaction_rescore"],
         resume=True,
         log=log,
     )

@@ -85,7 +85,8 @@ def base_manifest(
         },
         "models": {
             "dense": cfg.models.dense.model_dump(),
-            "colbert": cfg.models.colbert.model_dump(),
+            "bm25": cfg.models.bm25.model_dump(),
+            "late_interaction": cfg.models.late_interaction.model_dump(),
             "muvera": {**cfg.models.muvera.model_dump(), "dim": cfg.models.muvera.dim},
             "cross_encoder": cfg.models.cross_encoder.model_dump(),
         },

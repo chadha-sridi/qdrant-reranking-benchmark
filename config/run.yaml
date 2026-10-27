@@ -32,10 +32,10 @@ execution:
   # the compute. NFCorpus overrides this upward in datasets.yaml — it is the one dataset
   # still gaining at depth.
   depths: [10, 25, 50, 100, 200]
-  # colbert_rescore and muvera_colbert each pay one extra, untimed Qdrant call per
-  # query to measure how many relevant docs survived their prefetch stage. Real added
-  # wall-clock cost (roughly doubles those two arms' own query-side work); no effect on
-  # any recorded latency. Set false to skip it and run faster.
+  # The three server-side rescoring arms (*_late_interaction_rescore) each pay one extra,
+  # untimed Qdrant call per query to measure how many relevant docs survived their
+  # prefetch stage. Real added wall-clock cost (roughly doubles those arms' own
+  # query-side work); no effect on any recorded latency. Set false to skip it and run faster.
   capture_pool_recall: true
 
 qdrant:
@@ -60,8 +60,8 @@ qdrant:
     # Always use the HNSW graph. Qdrant's default (10000 KB) would silently full-scan
     # the two smallest datasets, so latency would compare ANN on the big corpora against
     # brute force on the small ones. 10 is Qdrant's minimum accepted value (it rejects 0)
-    # and every segment here clears it. Does not affect ColBERT, whose m=0 means it has
-    # no graph to use in the first place.
+    # and every segment here clears it. Does not affect the late-interaction vector,
+    # whose m=0 means it has no graph to use in the first place.
     full_scan_threshold_kb: 10
   upsert_batch_size: 256
   # Restored after the upload finishes, which is what triggers the HNSW build. Indexing
@@ -72,18 +72,23 @@ ingestion:
   # Documents embedded and upserted together before moving to the next chunk. At this
   # size peak embedding memory for the widest representation (MUVERA, 10,240-dim) is
   # ~600 MB, independent of corpus size — Quora's 522,931 docs would otherwise need the
-  # full corpus resident across dense+colbert+muvera at once.
+  # full corpus resident across dense+late_interaction+muvera at once.
   chunk_size: 10000
 
-# Every arm reranks the `dense` baseline, or a prefetch derived from it.
-# Hybrid-search/fusion arms and a BM25 sparse baseline are out of scope. All arms except
-# the baseline sweep candidate depth.
+# Two first stages, each a baseline that the arms below rerank: dense (bge-small) and
+# sparse (BM25). An arm is named after its first stage, so both families run in one
+# interleaved pass against one collection and share one significance table.
+# Hybrid-search/fusion arms are out of scope. All arms except the baselines sweep
+# candidate depth.
 arms:
   enabled:
-    - dense              # arm 1: the unified baseline every other arm reranks
-    - colbert_rescore    # arm 2: dense prefetch -> ColBERT MaxSim
-    - muvera_colbert     # arm 3: MUVERA prefetch -> exact MaxSim
-    - cross_encoder      # arm 4: dense prefetch -> client-side cross-encoder
+    - dense                            # baseline: dense HNSW search
+    - late_interaction_rescore         # dense prefetch -> late-interaction MaxSim
+    - muvera_late_interaction_rescore  # MUVERA prefetch -> exact MaxSim (vs dense)
+    - cross_encoder                    # dense prefetch -> client-side cross-encoder
+    - bm25                             # baseline: BM25 sparse search
+    - bm25_late_interaction_rescore    # BM25 prefetch -> late-interaction MaxSim
+    - bm25_cross_encoder               # BM25 prefetch -> client-side cross-encoder
   # Declared but gated. Flip via CLI flags, not by editing this list.
   gated: {}
 
