@@ -75,9 +75,7 @@ class Encoders:
         return np.asarray(next(iter(self.dense.query_embed(text))), dtype=np.float32)
 
     def embed_query_late_interaction(self, text: str) -> np.ndarray:
-        tokens = np.asarray(next(iter(self.late_interaction.query_embed(text))), dtype=np.float32)
-        limit = self.models.late_interaction.query_max_tokens
-        return tokens[:limit]
+        return np.asarray(next(iter(self.late_interaction.query_embed(text))), dtype=np.float32)
 
     # ------------------------------------------------------------------ documents
 
@@ -86,9 +84,8 @@ class Encoders:
         return np.asarray(out, dtype=np.float32)
 
     def embed_docs_late_interaction(self, texts: Sequence[str], batch_size: int = 16) -> list[np.ndarray]:
-        limit = self.models.late_interaction.doc_max_tokens
         return [
-            np.asarray(tokens, dtype=np.float32)[:limit]
+            np.asarray(tokens, dtype=np.float32)
             for tokens in self.late_interaction.embed(list(texts), batch_size=batch_size)
         ]
 

@@ -445,12 +445,14 @@ def muvera_calibration_status(cfg: Config, dataset: str) -> tuple[bool, str]:
 
     `muvera.calibrated: true` in config is a manual override for someone who has
     verified the model themselves; absent that, a passing calibration artifact for
-    THIS dataset must exist on disk. Neither being present is a hard exclusion, not a
+    THIS dataset must exist on disk. Either one counts only for the late-interaction
+    model it was calibrated on. Neither being present is a hard exclusion, not a
     warning — an uncalibrated FDE prefetch can silently measure its own recall ceiling
     rather than reranking quality.
     """
-    if cfg.models.muvera.calibrated:
-        return True, "models.yaml muvera.calibrated: true"
+    model = cfg.models.late_interaction.name
+    if cfg.models.muvera_calibrated:
+        return True, f"models.yaml muvera.calibrated: true for {model}"
 
     path = cfg.paths["agg"] / f"{dataset}__muvera_calibration.json"
     if not path.exists():
@@ -463,6 +465,13 @@ def muvera_calibration_status(cfg: Config, dataset: str) -> tuple[bool, str]:
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         return False, f"not calibrated: {path} is unreadable ({exc})"
+
+    calibrated_on = payload.get("late_interaction_model")
+    if calibrated_on != model:
+        return False, (
+            f"not calibrated: {path} was calibrated on {calibrated_on!r}, not {model!r}. "
+            f"Run `calibrate-muvera --dataset {dataset}` with this model."
+        )
 
     if not payload.get("beats_bag_of_tokens"):
         return False, f"not calibrated: {path} shows the FDE does not beat bag-of-tokens"

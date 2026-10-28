@@ -60,11 +60,12 @@ bm25:
     verified: true
 
 late_interaction:
-  name: "colbert-ir/colbertv2.0"
+  # Chosen over answerai-colbert-small-v1 and mLateOn on NFCorpus, each model at its own
+  # context window (DECISIONS.md O6). Runs on ONNX Runtime through FastEmbed, like every
+  # other encoder here.
+  name: "lightonai/LateOn"
   dim: 128
   distance: cosine
-  doc_max_tokens: 300
-  query_max_tokens: 32
   # Multivectors are for rescoring only. m=0 is required, not optional.
   hnsw_m: 0
   comparator: max_sim
@@ -81,14 +82,14 @@ muvera:
   d_proj: 16
   # dim = n_reps * 2**k_sim * d_proj = 20 * 32 * 16 = 10240
   distance: cosine  # matches the Qdrant MUVERA tutorial's collection config
-  calibrated: true
+  calibrated: false
+  calibrated_model: null
   calibration_note: >-
-    Calibrated 2026-09-03 on the full NFCorpus corpus (3,633 docs, 80 queries) with
-    fastembed's official Muvera at its own defaults. FDE beats bag-of-tokens at every
-    depth (recall@10: 0.352 vs 0.161; recall@500: 0.852 vs 0.709). Passes the >=80%
-    recall@deepest-depth threshold. See results/agg/nfcorpus__muvera_calibration.json.
-    At 10240 float32 dims MUVERA's storage advantage over ColBERT multivectors is
-    still modest — report that from the memory table rather than hiding it.
+    Not calibrated for lightonai/LateOn. On the full NFCorpus corpus (3,633 docs, 80
+    queries) at these defaults the FDE beats bag-of-tokens at every depth but recovers
+    only 68% of the exact max_sim top-10 by depth 500 (recall@10 0.126, recall@500
+    0.676), below the 80% threshold, so muvera_late_interaction_rescore is excluded until
+    that is resolved.
 
 cross_encoder:
   name: "Xenova/ms-marco-MiniLM-L-6-v2"

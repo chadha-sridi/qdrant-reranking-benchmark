@@ -337,6 +337,10 @@ def calibrate_muvera(
     dataset: Annotated[str, typer.Option()] = "nfcorpus",
     n_docs: Annotated[int, typer.Option(help="Corpus slice to calibrate against")] = 2000,
     n_queries: Annotated[int, typer.Option()] = 25,
+    results_dir: Annotated[
+        Optional[str],
+        typer.Option(help="Write the calibration artifact and query split under this directory instead of results/"),
+    ] = None,
 ) -> None:
     """Measure FDE prefetch recall against exact max_sim on REAL late-interaction embeddings.
 
@@ -347,6 +351,8 @@ def calibrate_muvera(
     from src.muvera import calibrate
 
     cfg = load_config()
+    if results_dir:
+        cfg = cfg.with_results_dir(results_dir)
     encoders = build_encoders(cfg)
     bundle = load_dataset_bundle(cfg, dataset)
 
@@ -365,6 +371,7 @@ def calibrate_muvera(
     )
     payload = result.as_dict() | {
         "config": cfg.models.muvera.model_dump(),
+        "late_interaction_model": cfg.models.late_interaction.name,
         "corpus": f"{dataset} first {n_docs} documents",
     }
     out = cfg.paths["agg"] / f"{dataset}__muvera_calibration.json"
@@ -386,7 +393,10 @@ def calibrate_muvera(
         )
     else:
         _echo(f"\n[calibration] {out}")
-        _echo("Set models.yaml muvera.calibrated: true only if the recall above is usable.")
+        _echo(
+            "Set models.yaml muvera.calibrated: true and calibrated_model: "
+            f"{cfg.models.late_interaction.name!r} only if the recall above is usable."
+        )
 
 
 @app.command()
@@ -442,7 +452,7 @@ def doctor() -> None:
             f"WARNING: Gate 1 reference {ref.metric}={ref.value} on {ref.dataset} is marked "
             "verified: false. Confirm it against the MTEB leaderboard before publishing."
         )
-    if not cfg.models.muvera.calibrated:
+    if not cfg.models.muvera_calibrated:
         _echo(
             f"WARNING: muvera is uncalibrated ({cfg.models.muvera.dim} dims from the paper's "
             "parameters, not a tuned setting). Run `benchmark calibrate-muvera` before "

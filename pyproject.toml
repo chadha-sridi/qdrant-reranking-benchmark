@@ -7,14 +7,14 @@ dependencies = [
     # Pinned to the server minor version: the client warns and may misbehave when the
     # minor versions diverge. Bump this together with the image tag in docker-compose.yml.
     "qdrant-client>=1.20.0,<1.21",
-    "fastembed>=0.7.2,<0.8",  # 0.7.2 introduced postprocess.Muvera
+    "fastembed>=0.9.1,<0.10",  # 0.9.0 added LateOn and mLateOn
     "ranx>=0.3.20,<0.4",
     "datasets>=3.0.0,<4",
     "numpy>=1.26,<3",
-    "pandas>=2.2,<3",
+    "pandas>=3.0,<3.1",
     "psutil>=6.0",
     "pydantic>=2.8,<3",
-    "typer>=0.12,<0.20",
+    "typer>=0.27,<0.28",
     "pyyaml>=6.0",
     "scipy>=1.13",
 ]

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 from qdrant_client import QdrantClient, models
@@ -104,7 +104,7 @@ def embed_corpus(
             model_name=f"fde({cfg.models.late_interaction.name})",
             dataset=name,
             corpus_digest=digest,
-            extra={"matrices": digest_str},
+            extra={"matrices": digest_str, "truncation": TRUNCATION},
         )
         cached_muvera = cache.load_dense(key)
         if cached_muvera is None:
@@ -142,18 +142,24 @@ def _dense_params(
     )
 
 
+# Documents are truncated only by each model's own context window. Part of every
+# late-interaction and MUVERA cache key, so vectors computed under any other truncation
+# are never reused.
+TRUNCATION = "model_context_window"
+
+
 def late_interaction_cache_key(
     cfg: Config, bundle: LoadedDataset, cache: EmbeddingCache | None = None
 ) -> str:
-    """The model name in the key separates models; the "colbert" namespace is a fixed
-    label for the late-interaction cache, so caches already on disk stay valid."""
+    """The model name and truncation in the key separate entries; "colbert" is a fixed
+    namespace label for the late-interaction cache."""
     cache = cache or EmbeddingCache(cfg.paths["cache"])
     return cache.key(
         representation="colbert",
         model_name=cfg.models.late_interaction.name,
         dataset=bundle.spec.name,
         corpus_digest=bundle.corpus_digest,
-        extra={"doc_max_tokens": cfg.models.late_interaction.doc_max_tokens},
+        extra={"truncation": TRUNCATION},
     )
 
 
@@ -170,7 +176,7 @@ def _chunk_late_interaction_cache_key(
         dataset=bundle.spec.name,
         corpus_digest=bundle.corpus_digest,
         extra={
-            "doc_max_tokens": cfg.models.late_interaction.doc_max_tokens,
+            "truncation": TRUNCATION,
             "chunk_start": chunk_start,
             "chunk_end": chunk_end,
         },
@@ -265,6 +271,28 @@ def bm25_index_params(cfg: Config) -> models.TextIndexParams:
     )
 
 
+def collection_metadata(cfg: Config, representations: Sequence[str]) -> dict[str, Any]:
+    """The models that produced a collection's vectors, stored on the collection.
+
+    Vector names, sizes and distances cannot tell two models of the same dimension
+    apart, so a resume checks these too.
+    """
+    meta: dict[str, Any] = {}
+    if "dense" in representations:
+        meta["dense_model"] = cfg.models.dense.name
+    if "late_interaction" in representations or "muvera" in representations:
+        meta["late_interaction_model"] = cfg.models.late_interaction.name
+    if "muvera" in representations:
+        muvera = cfg.models.muvera
+        meta["muvera"] = {
+            "k_sim": muvera.k_sim,
+            "n_reps": muvera.n_reps,
+            "d_proj": muvera.d_proj,
+            "seed": cfg.run.seeds.muvera,
+        }
+    return meta
+
+
 def create_collection(
     client: QdrantClient,
     cfg: Config,
@@ -282,6 +310,7 @@ def create_collection(
         collection_name=name,
         vectors_config=dense_cfg or None,
         shard_number=shard_number,
+        metadata=collection_metadata(cfg, representations),
     )
     # Created before the upload, so documents are indexed as they arrive and the
     # optimizer's final rebuild leaves BM25's corpus statistics complete.
@@ -553,6 +582,7 @@ def _embed_chunk(
             corpus_digest=digest,
             extra={
                 "matrices": digest_str,
+                "truncation": TRUNCATION,
                 "chunk_start": chunk_start,
                 "chunk_end": chunk_end,
             },
@@ -697,8 +727,9 @@ def _config_matches(
     """Is an existing collection's config the one this run would create?
 
     The vector names, sizes, and distances are compared — those are what make stored
-    points reusable — and, when BM25 is wanted, its full-text index and that index's
-    text processing. A mismatch means the collection cannot be resumed into.
+    points reusable — along with the models recorded in the collection's metadata and,
+    when BM25 is wanted, its full-text index and that index's text processing. A
+    mismatch means the collection cannot be resumed into.
     """
     try:
         info = client.get_collection(name)
@@ -712,6 +743,8 @@ def _config_matches(
         have = existing[vector_name]
         if have.size != want.size or have.distance != want.distance:
             return False
+    if (info.config.metadata or {}) != collection_metadata(cfg, representations):
+        return False
     if "bm25" not in representations:
         return True
     index = (info.payload_schema or {}).get(cfg.models.bm25.field)

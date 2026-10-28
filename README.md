@@ -261,9 +261,17 @@ replaces the `dense` first stage only; the `bm25` family is unaffected. Overridi
 invalidates the pinned Gate 1 reference score for `dense`, and the CLI says so.
 
 **"Late interaction" names the mechanism, not a model.** Any multivector model scored
-with MaxSim goes under `late_interaction` in `config/models.yaml`; it is currently
-`colbert-ir/colbertv2.0`, and the measurements quoted in this README are from that
-model.
+with MaxSim goes under `late_interaction` in `config/models.yaml`. It is
+`lightonai/LateOn`, run through FastEmbed on ONNX Runtime like every other encoder. It
+was chosen over `answerai-colbert-small-v1` and `mLateOn` on NFCorpus, each at its own
+context window (DECISIONS.md O6). Measurements quoted elsewhere in this README that
+predate it are from `colbert-ir/colbertv2.0` and say so.
+
+**Every model keeps its own context window.** The benchmark truncates neither documents
+nor queries: each encoder stops where its own tokenizer does (bge-small and answerai at
+512 tokens, LateOn at 300, mLateOn at 8,192). Capping one model to match another would
+measure the cap, not the model. Late-interaction memory follows from it, since a
+multivector stores one vector per kept token.
 
 **The late-interaction arms use `max_sim`**, the only multivector comparator Qdrant
 offers. The late-interaction vector is indexed with HNSW `m=0` — required, not optional, since `max_sim`
@@ -318,7 +326,7 @@ across every candidate depth (28.6–29.1 pairs/sec at depths 10 through 500):
 |---|---:|
 | Cross-encoder rerank | **28.8 pairs/sec** |
 | Dense embedding | 121 docs/sec |
-| ColBERT embedding | 87 docs/sec |
+| ColBERTv2 embedding | 87 docs/sec |
 
 Cross-encoder throughput depends strongly on document length, and these are long
 PubMed-style abstracts; expect a different figure on short-document corpora.
@@ -328,7 +336,7 @@ PubMed-style abstracts; expect a different figure on short-document corpora.
 | | Hours |
 |---|---:|
 | Dense (bge-small) | ~1.4h |
-| ColBERT | ~2.0h |
+| ColBERTv2 | ~2.0h |
 | **Total** | **~3.4h** for all five (Quora alone is ~2.9h; the default set is ~0.5h) |
 
 BM25 needs no embedding: Qdrant builds its index from the stored text during upload.
@@ -423,8 +431,9 @@ unindexed, which reports `status: green` while every search is a brute-force sca
 **Interruption is recoverable.** Point ids are the corpus enumeration order, so they are
 deterministic: a re-sent point overwrites itself rather than duplicating. `--resume-ingestion`
 reuses a config-matching collection and re-sends only the missing ids. The collection is
-dropped and rebuilt only when its vector config does not match what the run asks for,
-since two vector configs cannot be mixed in one collection.
+dropped and rebuilt when its vector config, or the models recorded in its metadata, do
+not match what the run asks for: two models of the same dimension produce
+indistinguishable vector configs, and their vectors must never share a collection.
 
 **Verification is a hard failure, not a warning.** Silent under-ingestion is the failure
 mode that matters: a short collection inflates latency (a smaller index is faster) and
@@ -435,7 +444,7 @@ so ingestion aborts on any mismatch.
 
 The embedding step is the one part that does **not** resume: the cache is written per
 representation once the whole corpus is embedded, so a crash partway through Quora's
-ColBERT pass (~2.9 h) loses that pass. Once cached, it is reused for free.
+late-interaction pass (~2.9 h with ColBERTv2) loses that pass. Once cached, it is reused for free.
 
 ---
 
@@ -653,6 +662,8 @@ python -m src.cli calibrate-muvera --dataset nfcorpus --n-docs 2000 --n-queries 
 Required before trusting any `muvera_late_interaction_rescore` number — see
 [Known limitations](#known-limitations). Compares FDE-prefetch recall against exact
 `max_sim` and against a trivial bag-of-tokens baseline on real late-interaction embeddings.
+`--results-dir` works as for `run`: the artifact is written where that run's
+`muvera_late_interaction_rescore` gate reads it.
 
 ### `plan` — print the execution plan, touch nothing
 
@@ -744,12 +755,14 @@ far more, which is what keeps the widened tolerance meaningful rather than vacuo
 (0.325, Elasticsearch), tolerance 0.02, measured through Qdrant's BM25 text index over
 all 323 judged queries.
 
-MUVERA's calibration is in place: it uses fastembed's official `Muvera` postprocessor and
-is validated on the full NFCorpus corpus (see
-[Known limitations](#known-limitations)). `muvera_late_interaction_rescore` is still gated per dataset —
+MUVERA is not yet calibrated for LateOn (see [Known limitations](#known-limitations)), so
+`muvera_late_interaction_rescore` is excluded until it is. The arm is gated per dataset —
 `resolve_arms` excludes it on any dataset without a passing calibration artifact or an
 explicit `muvera.calibrated: true` override, so it cannot silently run uncalibrated even
-if you add a new dataset later.
+if you add a new dataset later. Both count only for the late-interaction model they were
+calibrated on (`muvera.calibrated_model`, and `late_interaction_model` in the artifact):
+the FDE is only as good as the token distribution it was tuned on, so a new model is
+recalibrated, and config loading refuses `calibrated: true` for any other model.
 
 Run the test suite:
 
@@ -793,17 +806,19 @@ caveats above. Report it alongside any published number.
 
 Open items worth knowing before you lean on a number:
 
-- **MUVERA is calibrated, but the margin is real and worth knowing.** `src/muvera.py`
-  wraps fastembed's official `Muvera` postprocessor (`fastembed>=0.7.2`), the reference
-  implementation. Calibrated on the full NFCorpus corpus (3,633 docs,
-  80 queries): the FDE beats a bag-of-tokens baseline at every depth (recall@10: 0.352
-  vs 0.161; recall@500: 0.852 vs 0.709). `muvera_late_interaction_rescore` is gated per dataset —
+- **MUVERA does not pass calibration on LateOn's tokens.** `src/muvera.py` wraps
+  fastembed's official `Muvera` postprocessor (`fastembed>=0.7.2`), the reference
+  implementation, at its own defaults. On the full NFCorpus corpus (3,633 docs,
+  80 queries) the FDE beats a bag-of-tokens baseline at every depth but recovers only
+  68% of the exact MaxSim top-10 by depth 500 (recall@10: 0.126; recall@500: 0.676),
+  below the 80% threshold. On ColBERTv2's tokens the same settings passed (recall@500:
+  0.852). `muvera_late_interaction_rescore` is gated per dataset —
   `resolve_arms` excludes it unless `muvera.calibrated: true` or a passing
   `{dataset}__muvera_calibration.json` artifact exists — so adding a new dataset
   doesn't silently inherit NFCorpus's calibration. Re-run `calibrate-muvera` for any
   dataset whose token/document distribution might differ meaningfully. Also worth
   noting: at 10,240 float32 dimensions, MUVERA's storage footprint is not dramatically
-  smaller than the ColBERT multivectors it prefetches for — report that from the
+  smaller than the late-interaction multivectors it prefetches for — report that from the
   memory table rather than tuning the FDE down until the comparison flatters.
 - **Learning-to-rank is deliberately not an arm.** It would need per-dataset trained
   models, breaking the zero-training/drop-in-evaluable property every other arm has,

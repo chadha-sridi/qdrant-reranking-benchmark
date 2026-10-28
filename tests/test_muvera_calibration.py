@@ -23,7 +23,7 @@ N_QUERIES = 25
 
 
 @pytest.fixture(scope="module")
-def calibration(cfg, nfcorpus, encoders, tmp_path_factory):
+def calibration(cfg, nfcorpus, encoders):
     from src.muvera import calibrate
 
     docs = [doc.text for doc in nfcorpus.documents[:N_DOCS]]

@@ -72,6 +72,50 @@ def test_muvera_calibration_gate_blocks_without_an_artifact_or_override():
     assert "calibrate-muvera" in reason
 
 
+def _with_late_interaction_model(cfg, name):
+    late_interaction = cfg.models.late_interaction.model_copy(update={"name": name})
+    return cfg.model_copy(
+        update={"models": cfg.models.model_copy(update={"late_interaction": late_interaction})}
+    )
+
+
+def _with_muvera_calibrated_for(cfg, model):
+    muvera = cfg.models.muvera.model_copy(update={"calibrated": True, "calibrated_model": model})
+    return cfg.model_copy(update={"models": cfg.models.model_copy(update={"muvera": muvera})})
+
+
+def test_muvera_calibration_is_refused_at_load_for_another_model():
+    """Switching models.yaml to a new late-interaction model must not inherit the old
+    model's MUVERA calibration."""
+    from src.config import ModelsConfig
+
+    raw = load_config().models.model_dump()
+    raw["muvera"]["calibrated"] = True
+    raw["muvera"]["calibrated_model"] = "some/other-model"
+    with pytest.raises(ValueError, match="Recalibrate"):
+        ModelsConfig.model_validate(raw)
+
+
+def test_muvera_calibration_counts_only_for_the_model_it_was_calibrated_on(tmp_path):
+    from src.arms import muvera_calibration_status
+
+    cfg = load_config().with_results_dir(str(tmp_path))
+    model = cfg.models.late_interaction.name
+    assert muvera_calibration_status(_with_muvera_calibrated_for(cfg, model), "nfcorpus")[0]
+    switched = _with_late_interaction_model(_with_muvera_calibrated_for(cfg, model), "some/other-model")
+    ok, reason = muvera_calibration_status(switched, "nfcorpus")
+    assert not ok and "calibrate-muvera" in reason
+
+    artifact = cfg.paths["agg"] / "nfcorpus__muvera_calibration.json"
+    artifact.parent.mkdir(parents=True)
+    passing = {"beats_bag_of_tokens": True, "recall_at": {"100": 0.9}}
+    artifact.write_text(json.dumps(passing | {"late_interaction_model": "some/other-model"}))
+    ok, reason = muvera_calibration_status(cfg, "nfcorpus")
+    assert not ok and "some/other-model" in reason
+    artifact.write_text(json.dumps(passing | {"late_interaction_model": model}))
+    assert muvera_calibration_status(cfg, "nfcorpus")[0]
+
+
 def test_execution_config_rejects_depth_below_final_limit():
     with pytest.raises(ValueError, match="prefetch.limit"):
         ExecutionConfig(
@@ -88,9 +132,27 @@ def test_late_interaction_config_rejects_nonzero_m():
 
     with pytest.raises(ValueError, match="hnsw_m must be 0"):
         LateInteractionModel(
-            name="x", dim=128, distance="cosine", doc_max_tokens=300,
-            query_max_tokens=32, hnsw_m=16, comparator="max_sim",
+            name="x", dim=128, distance="cosine", hnsw_m=16, comparator="max_sim",
         )
+
+
+def test_late_interaction_tokens_are_kept_to_the_model_own_window():
+    """The encoder's output is stored as is, however long the model allows it to be."""
+    import numpy as np
+
+    from src.embedding import Encoders
+
+    class LongModel:
+        def embed(self, texts, batch_size):
+            return (np.ones((600, 4)) for _ in texts)
+
+        def query_embed(self, text):
+            return iter([np.ones((40, 4))])
+
+    cfg = load_config()
+    enc = Encoders(models=cfg.models, muvera_seed=0, _late_interaction=LongModel())
+    assert [m.shape[0] for m in enc.embed_docs_late_interaction(["a", "b"])] == [600, 600]
+    assert enc.embed_query_late_interaction("q").shape[0] == 40
 
 
 def test_dataset_set_is_the_agreed_five_with_quora_out_of_the_default_set():
@@ -257,10 +319,12 @@ def test_pool_doc_ids_capture_is_untimed_and_config_gated():
     assert len(calls) == 1, "disabled must not issue the call at all"
 
 
-def test_resolve_arms_matches_the_default_set():
-    cfg = load_config()
+def test_resolve_arms_matches_the_default_set(tmp_path):
+    """With MUVERA calibrated for the configured model, nothing is excluded."""
     from src.arms import REGISTRY, resolve_arms
 
+    cfg = load_config().with_results_dir(str(tmp_path))
+    cfg = _with_muvera_calibrated_for(cfg, cfg.models.late_interaction.name)
     arms, exclusions = resolve_arms(cfg, "nfcorpus")
     assert not exclusions, f"unexpected exclusions: {exclusions}"
     assert {a.name for a in arms} == set(cfg.run.arms.enabled)
@@ -538,7 +602,12 @@ def test_collection_without_the_bm25_index_is_rebuilt_not_resumed():
 
     from qdrant_client import models
 
-    from src.indexing import _config_matches, bm25_index_params, vectors_config
+    from src.indexing import (
+        _config_matches,
+        bm25_index_params,
+        collection_metadata,
+        vectors_config,
+    )
 
     cfg = load_config()
     spec = cfg.datasets.get("nfcorpus")
@@ -548,7 +617,8 @@ def test_collection_without_the_bm25_index_is_rebuilt_not_resumed():
 
     def client_with(payload_schema):
         params = SimpleNamespace(vectors=vectors_config(cfg, spec, reps))
-        info = SimpleNamespace(config=SimpleNamespace(params=params), payload_schema=payload_schema)
+        config = SimpleNamespace(params=params, metadata=collection_metadata(cfg, reps))
+        info = SimpleNamespace(config=config, payload_schema=payload_schema)
         return SimpleNamespace(get_collection=lambda name: info)
 
     def index(params):
@@ -560,6 +630,35 @@ def test_collection_without_the_bm25_index_is_rebuilt_not_resumed():
     assert not _config_matches(client_with(index(unscored)), cfg, spec, "c", reps)
     unstemmed = bm25_index_params(cfg).model_copy(update={"stemmer": None})
     assert not _config_matches(client_with(index(unstemmed)), cfg, spec, "c", reps)
+
+
+def test_collection_built_by_another_model_of_the_same_dim_is_rebuilt_not_resumed():
+    """ColBERTv2, LateOn and mLateOn are all 128-dim, so vector sizes alone would let a
+    resume mix two models' vectors in one collection."""
+    from types import SimpleNamespace
+
+    from src.indexing import _config_matches, collection_metadata, vectors_config
+
+    cfg = load_config()
+    spec = cfg.datasets.get("scifact")
+    reps = [r for r in spec.representations if r != "bm25"]
+
+    def client_built_by(build_cfg):
+        params = SimpleNamespace(vectors=vectors_config(build_cfg, spec, reps))
+        config = SimpleNamespace(params=params, metadata=collection_metadata(build_cfg, reps))
+        return SimpleNamespace(get_collection=lambda name: SimpleNamespace(config=config))
+
+    other = _with_late_interaction_model(cfg, "colbert-ir/colbertv2.0")
+    assert _config_matches(client_built_by(cfg), cfg, spec, "c", reps)
+    assert not _config_matches(client_built_by(cfg), other, spec, "c", reps)
+    unrecorded = SimpleNamespace(
+        get_collection=lambda name: SimpleNamespace(
+            config=SimpleNamespace(
+                params=SimpleNamespace(vectors=vectors_config(cfg, spec, reps)), metadata=None
+            )
+        )
+    )
+    assert not _config_matches(unrecorded, cfg, spec, "c", reps)
 
 
 def test_bm25_first_stage_is_a_server_side_text_query_with_configured_k_and_b():

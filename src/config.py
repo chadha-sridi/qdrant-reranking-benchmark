@@ -187,8 +187,6 @@ class LateInteractionModel(_Frozen):
     name: str
     dim: int
     distance: Literal["cosine", "dot", "euclid"]
-    doc_max_tokens: int
-    query_max_tokens: int
     hnsw_m: int
     comparator: Literal["max_sim"]
 
@@ -214,6 +212,10 @@ class MuveraModel(_Frozen):
     distance: Literal["cosine", "dot"]
     # Set true only after tests/test_muvera_calibration.py passes on real embeddings.
     calibrated: bool = False
+    # The late-interaction model whose tokens the calibration used. The FDE's quality
+    # depends on the token distribution, so a calibration never carries over to another
+    # model.
+    calibrated_model: str | None = None
     calibration_note: str | None = None
 
     @property
@@ -237,6 +239,21 @@ class ModelsConfig(_Frozen):
     late_interaction: LateInteractionModel
     muvera: MuveraModel
     cross_encoder: CrossEncoderModel
+
+    @model_validator(mode="after")
+    def _calibration_matches_model(self) -> ModelsConfig:
+        if self.muvera.calibrated and self.muvera.calibrated_model != self.late_interaction.name:
+            raise ValueError(
+                f"muvera.calibrated is true for {self.muvera.calibrated_model!r}, but the "
+                f"late-interaction model is {self.late_interaction.name!r}. Recalibrate with "
+                "`calibrate-muvera` and set calibrated_model, or set calibrated: false."
+            )
+        return self
+
+    @property
+    def muvera_calibrated(self) -> bool:
+        """The config-level override, valid only for the model it was calibrated on."""
+        return self.muvera.calibrated and self.muvera.calibrated_model == self.late_interaction.name
 
 
 # ---------------------------------------------------------------------- datasets

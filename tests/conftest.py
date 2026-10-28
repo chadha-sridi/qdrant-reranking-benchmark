@@ -12,8 +12,10 @@ from src.config import load_config
 
 
 @pytest.fixture(scope="session")
-def cfg():
-    return load_config()
+def cfg(tmp_path_factory):
+    """Every test writes its run outputs under a temporary results directory, so the
+    recorded `results/` is never touched. The embedding cache stays shared."""
+    return load_config().with_results_dir(str(tmp_path_factory.mktemp("results")))
 
 
 @pytest.fixture(scope="session")
