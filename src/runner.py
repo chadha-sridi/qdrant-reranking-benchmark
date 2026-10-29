@@ -133,6 +133,7 @@ def warmup(
     done = 0
     for query_id in query_ids:
         text = bundle.queries[query_id]
+        ctx.pointwise_scores = {} if ctx.cfg.run.execution.share_pointwise_scores else None
         for unit in units:
             try:
                 unit.arm(ctx, text, unit.depth)
@@ -208,6 +209,7 @@ def run_dataset(
                 for q_index, qi in enumerate(query_order):
                     query_id = query_ids[qi]
                     text = eval_queries[query_id]
+                    ctx.pointwise_scores = {} if cfg.run.execution.share_pointwise_scores else None
                     order_seed = cfg.run.seeds.plan_shuffle + run_idx * len(query_ids) + q_index
                     order = np.random.default_rng(order_seed).permutation(len(units))
                     for unit_index in order:

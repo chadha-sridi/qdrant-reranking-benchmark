@@ -143,6 +143,92 @@ def test_dense_onnx_source_gets_its_own_identity_and_registers_once():
     assert names.count(dense.model_id) == 1
 
 
+def test_pointwise_scores_are_shared_within_a_query_and_costed_per_pair():
+    """Depths and both cross-encoder arms share one forward pass per (query, doc) pair;
+    each unit's t_rerank is the attributed measured cost of its own pairs."""
+    from types import SimpleNamespace
+
+    from src.arms import _pointwise_scores
+    from src.timing import QueryTimers
+
+    calls: list[list[str]] = []
+
+    class Cross:
+        def rerank(self, query, texts):
+            calls.append(list(texts))
+            return [float(len(text)) for text in texts]
+
+    cross = Cross()
+    ctx = SimpleNamespace(pointwise_scores={}, encoders=SimpleNamespace(cross=cross))
+    ids = [f"d{i}" for i in range(6)]
+    texts = ["x" * (i + 1) for i in range(6)]
+
+    deep = QueryTimers()
+    scores_deep = _pointwise_scores(ctx, deep, "q", ids, texts)
+    shallow = QueryTimers()
+    scores_shallow = _pointwise_scores(ctx, shallow, "q", ids[:3], texts[:3])
+    assert calls == [texts], "a shallower unit must not re-score cached pairs"
+    assert scores_shallow == scores_deep[:3]
+    per_pair_ms = ctx.pointwise_scores[ids[0]][1] * 1000.0
+    assert deep.t_rerank_ms == pytest.approx(6 * per_pair_ms)
+    assert shallow.t_rerank_ms == pytest.approx(3 * per_pair_ms)
+
+    # The other first stage's arm pays only for pairs it alone introduces.
+    _pointwise_scores(ctx, QueryTimers(), "q", [ids[0], "other"], [texts[0], "zz"])
+    assert calls[1] == ["zz"]
+
+    # Sharing off (cache None): every call is a full, independently timed scoring.
+    off = SimpleNamespace(pointwise_scores=None, encoders=SimpleNamespace(cross=cross))
+    assert _pointwise_scores(off, QueryTimers(), "q", ids[:2], texts[:2]) == scores_deep[:2]
+    assert calls[2] == texts[:2]
+
+
+def test_muvera_parallel_encoding_matches_serial():
+    import numpy as np
+
+    from src.muvera import encode_documents
+
+    cfg = load_config().models.muvera.model_copy(update={"k_sim": 2, "d_proj": 4, "n_reps": 2})
+    rng = np.random.default_rng(0)
+    docs = [
+        rng.standard_normal((int(rng.integers(3, 30)), 16)).astype(np.float32)
+        for _ in range(40)
+    ]
+    serial = encode_documents(cfg, 16, 123, docs, workers=1)
+    parallel = encode_documents(cfg, 16, 123, docs, workers=3)
+    np.testing.assert_array_equal(serial, parallel)
+    assert serial.dtype == np.float32 and serial.shape == (40, cfg.dim)
+
+
+def test_vectorized_chamfer_matches_the_per_document_loop():
+    import numpy as np
+
+    from src.muvera import chamfer_blocks, chamfer_similarity, exact_chamfer_scores
+
+    rng = np.random.default_rng(1)
+    docs = [
+        rng.standard_normal((int(rng.integers(1, 9)), 8)).astype(np.float32)
+        for _ in range(23)
+    ]
+    query = rng.standard_normal((5, 8)).astype(np.float32)
+    blocks = chamfer_blocks(docs, max_block_tokens=40)  # force several blocks
+    assert len(blocks) > 1
+    want = np.array([chamfer_similarity(query, doc) for doc in docs])
+    np.testing.assert_allclose(exact_chamfer_scores(query, blocks), want, rtol=1e-5)
+    with pytest.raises(ValueError, match="empty document"):
+        chamfer_blocks([np.zeros((0, 8), dtype=np.float32)])
+
+
+def test_only_required_representations_are_built():
+    from src.arms import REGISTRY, required_representations
+
+    assert required_representations([REGISTRY["dense"], REGISTRY["cross_encoder"]]) == {"dense"}
+    assert required_representations([REGISTRY["bm25_cross_encoder"]]) == {"bm25"}
+    assert required_representations(list(REGISTRY.values())) == {
+        "dense", "bm25", "late_interaction", "muvera",
+    }
+
+
 def test_execution_config_rejects_depth_below_final_limit():
     with pytest.raises(ValueError, match="prefetch.limit"):
         ExecutionConfig(

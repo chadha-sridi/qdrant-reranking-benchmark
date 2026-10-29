@@ -22,6 +22,7 @@ rescoring, and sharding. Nothing here fuses rank lists.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
@@ -50,6 +51,10 @@ class ArmContext:
     id_map: IdMap
     collection: str
     dataset: str
+    # Per-query cross-encoder score cache, doc_id -> (score, attributed cost in seconds).
+    # The runner resets it for every query; None disables sharing (see
+    # execution.share_pointwise_scores).
+    pointwise_scores: dict[str, tuple[float, float]] | None = None
 
 
 @dataclass
@@ -398,17 +403,45 @@ def _cross_encoder(ctx: ArmContext, query: str, depth: int | None, *, first_stag
         limit=depth, with_payload=["doc_id", "text"],
     )
 
+    doc_ids = [ctx.id_map.doc(p.id) for p in candidates]
+    texts = [(p.payload or {}).get("text", "") for p in candidates]
+    scores = _pointwise_scores(ctx, timers, query, doc_ids, texts)
     with timers.rerank():
-        documents = [(p.payload or {}).get("text", "") for p in candidates]
-        scores = list(ctx.encoders.cross.rerank(query, documents)) if documents else []
         order = np.argsort(-np.asarray(scores, dtype=np.float64)) if scores else []
-        retrieved = [
-            (ctx.id_map.doc(candidates[i].id), float(scores[i])) for i in list(order)[:limit]
-        ]
+        retrieved = [(doc_ids[i], float(scores[i])) for i in list(order)[:limit]]
 
     # The candidates already ARE the pool this arm reranks — no extra query needed.
-    pool = [ctx.id_map.doc(p.id) for p in candidates]
-    return ArmOutput(retrieved, timers, pool_doc_ids=pool)
+    return ArmOutput(retrieved, timers, pool_doc_ids=doc_ids)
+
+
+def _pointwise_scores(
+    ctx: ArmContext, timers: QueryTimers, query: str, doc_ids: list[str], texts: list[str]
+) -> list[float]:
+    """Cross-encoder scores for (query, doc) pairs, shared across one query's units.
+
+    The model scores each pair independently of the rest of the pool, so two units that
+    meet the same document — a deeper depth, or the other first stage's arm — need only
+    one forward pass. Each pair's measured cost is attributed to every unit that uses
+    the pair, so `t_rerank_ms` reports what a stand-alone unit would have paid.
+    """
+    cache = ctx.pointwise_scores
+    if cache is None:
+        with timers.rerank():
+            return list(ctx.encoders.cross.rerank(query, texts)) if texts else []
+    new = [(doc_id, text) for doc_id, text in zip(doc_ids, texts) if doc_id not in cache]
+    if new:
+        start = time.perf_counter()
+        scores = list(ctx.encoders.cross.rerank(query, [text for _, text in new]))
+        per_pair = (time.perf_counter() - start) / len(new)
+        for (doc_id, _), score in zip(new, scores):
+            cache[doc_id] = (float(score), per_pair)
+    timers.add_rerank_time(sum(cache[doc_id][1] for doc_id in doc_ids))
+    return [cache[doc_id][0] for doc_id in doc_ids]
+
+
+def required_representations(arms: Sequence[ArmSpec]) -> set[str]:
+    """The representations these arms actually read. Anything else need not be built."""
+    return {rep for arm in arms for rep in arm.requires}
 
 
 @register(
@@ -451,6 +484,8 @@ def muvera_calibration_status(cfg: Config, dataset: str) -> tuple[bool, str]:
     rather than reranking quality.
     """
     model = cfg.models.late_interaction.name
+    if cfg.models.muvera.allow_uncalibrated:
+        return True, "uncalibrated, allowed by --allow-uncalibrated-muvera"
     if cfg.models.muvera_calibrated:
         return True, f"models.yaml muvera.calibrated: true for {model}"
 

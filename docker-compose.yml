@@ -19,7 +19,7 @@ services:
       - qdrant_storage:/qdrant/storage
     environment:
       QDRANT__LOG_LEVEL: WARN
-      QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS: 4
+      QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS: 8
       QDRANT__TELEMETRY_DISABLED: "true"
     # No memory limit: the memory phase reads Qdrant's own per-collection accounting,
     # and a cgroup cap would clip the figures being observed.

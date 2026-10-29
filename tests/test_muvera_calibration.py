@@ -24,7 +24,9 @@ def calibration(cfg, nfcorpus, encoders):
 
     doc_tokens, query_tokens = calibration_inputs(cfg, nfcorpus, encoders)
     result = calibrate(
-        encoders.muvera,
+        cfg.models.muvera,
+        cfg.models.late_interaction.dim,
+        cfg.run.seeds.muvera,
         doc_tokens,
         query_tokens,
         depths=tuple(cfg.depths_for("nfcorpus")),  # nfcorpus's own (deeper) sweep, not the global default

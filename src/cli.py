@@ -87,6 +87,14 @@ def run(
         Optional[str],
         typer.Option(help="Write raw records, aggregates, query samples and the manifest here instead of results/ (relative to the repo root). The embedding cache is shared."),
     ] = None,
+    muvera_setting: Annotated[
+        Optional[str],
+        typer.Option(help="Override MUVERA's k_sim,d_proj,n_reps for this run, e.g. 4,16,40"),
+    ] = None,
+    allow_uncalibrated_muvera: Annotated[
+        bool,
+        typer.Option(help="Run muvera_late_interaction_rescore without a passing calibration, to measure it end to end. Recorded in the manifest."),
+    ] = False,
 ) -> None:
     """Index, measure memory, execute the interleaved plan, and aggregate."""
     cfg = load_config()
@@ -95,6 +103,17 @@ def run(
         _echo(f"writing results under {cfg.paths['results']}")
     if depths:
         cfg = cfg.with_depths_override(_parse_depths(depths))
+    if muvera_setting or allow_uncalibrated_muvera:
+        update: dict = {"allow_uncalibrated": allow_uncalibrated_muvera}
+        if muvera_setting:
+            k_sim, d_proj, n_reps = (int(part) for part in muvera_setting.split(","))
+            update |= {"k_sim": k_sim, "d_proj": d_proj, "n_reps": n_reps}
+        muvera = cfg.models.muvera.model_copy(update=update)
+        cfg = cfg.model_copy(update={"models": cfg.models.model_copy(update={"muvera": muvera})})
+        _echo(
+            f"muvera: k_sim={muvera.k_sim} d_proj={muvera.d_proj} n_reps={muvera.n_reps} "
+            f"(dim {muvera.dim}){', uncalibrated allowed' if allow_uncalibrated_muvera else ''}"
+        )
     used_default_dense_model = dense_model is None
     if dense_model:
         from .embedding import resolve_dense_model_dim
@@ -205,9 +224,20 @@ def run(
             if removed:
                 _echo(f"  --overwrite: deleted {removed} existing raw file(s) for {name}")
 
-        _echo("  building the collection every arm queries")
+        # Build only what the requested arms read: a pilot without the MUVERA arm should
+        # pay neither its encoding nor its 10,240-dim HNSW build. The official run
+        # requests every arm, so it still builds everything.
+        from .arms import required_representations, resolve_arms
+
+        resolved_arms, excluded = resolve_arms(cfg, name, include=requested_arms)
+        if not resolved_arms:
+            raise RuntimeError(f"{name}: no runnable arms; exclusions={excluded}")
+        needed = required_representations(resolved_arms)
+        representations = [r for r in bundle.spec.representations if r in needed]
+        _echo(f"  building the collection every arm queries ({', '.join(representations)})")
         collection = build_collection(
             cfg, bundle, encoders, controller,
+            representations=representations,
             restart=not resume_ingestion, resume=resume_ingestion,
         )
 
@@ -220,9 +250,11 @@ def run(
                 collection,
                 dataset=name,
                 n_documents=len(bundle.documents),
-                n_token_vectors=token_vector_count(cfg, bundle),
+                n_token_vectors=token_vector_count(cfg, bundle)
+                if "late_interaction" in needed or "muvera" in needed
+                else None,
             )
-            verify_expected_representations(cfg, memory, bundle.spec.representations)
+            verify_expected_representations(cfg, memory, representations)
             if not allow_disk_bound:
                 check_fits_in_memory(memory, server_resources["memory_bytes"])
             memory_record = memory.as_dict()
@@ -354,7 +386,7 @@ def tune_muvera(
     """
     from itertools import product
 
-    from src.muvera import build_muvera, calibrate, calibration_inputs
+    from src.muvera import calibrate, calibration_inputs
 
     cfg = load_config()
     if results_dir:
@@ -385,11 +417,14 @@ def tune_muvera(
         )
         for setting in settings:
             result = calibrate(
-                build_muvera(setting, token_dim, cfg.run.seeds.muvera),
+                setting,
+                token_dim,
+                cfg.run.seeds.muvera,
                 doc_tokens,
                 query_tokens,
                 depths=depths,
                 truth_k=cfg.run.execution.final_limit,
+                workers=cfg.run.ingestion.muvera_workers or None,
             )
             fde_bytes = setting.dim * 4
             rows.append(
@@ -477,11 +512,14 @@ def calibrate_muvera(
     _echo(f"{len(doc_tokens)} documents, {len(query_tokens)} held-out warmup queries")
 
     result = calibrate(
-        encoders.muvera,
+        cfg.models.muvera,
+        cfg.models.late_interaction.dim,
+        cfg.run.seeds.muvera,
         doc_tokens,
         query_tokens,
         depths=tuple(cfg.depths_for(dataset)),
         truth_k=cfg.run.execution.final_limit,
+        workers=cfg.run.ingestion.muvera_workers or None,
     )
     payload = result.as_dict() | {
         "config": cfg.models.muvera.model_dump(),

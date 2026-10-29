@@ -331,6 +331,11 @@ across every candidate depth (28.6–29.1 pairs/sec at depths 10 through 500):
 Cross-encoder throughput depends strongly on document length, and these are long
 PubMed-style abstracts; expect a different figure on short-document corpora.
 
+With `execution.share_pointwise_scores` (default on), each (query, document) pair is
+scored once per query and its measured cost attributed to every unit that uses it —
+rankings identical, `t_rerank_ms` still a measured per-pair figure — so the
+cross-encoder arms' wall-clock drops ~45% against the figures below, which predate it.
+
 **One-time, cached** — corpus embedding (615,042 documents across the five datasets):
 
 | | Hours |
@@ -394,7 +399,9 @@ dataset with real quality headroom past depth 200.
 
 **One collection per dataset, named after the dataset**, holding every representation
 as a **named vector** on the same points — `dense`, `muvera`, and `late_interaction`, all
-fp32, plus a BM25-scored full-text index on the `text` payload. Every arm queries that one collection, so each arm's prefetch
+fp32, plus a BM25-scored full-text index on the `text` payload. A run builds only the
+representations its requested arms read — a pilot without the MUVERA arm pays neither
+MUVERA's encoding nor its HNSW build; the official all-arms run still builds everything. Every arm queries that one collection, so each arm's prefetch
 reads the same HNSW graph, the same payload, and the same page cache; the only thing
 that differs between arms is the strategy under test. One collection per representation
 would make arm-to-arm latency incomparable, which is the benchmark's primary axis.
@@ -442,9 +449,9 @@ valid run. An upload that times out or drops its connection partway leaves exact
 with nothing else to notice it, and no downstream check can detect it after the fact —
 so ingestion aborts on any mismatch.
 
-The embedding step is the one part that does **not** resume: the cache is written per
-representation once the whole corpus is embedded, so a crash partway through Quora's
-late-interaction pass (~2.9 h with ColBERTv2) loses that pass. Once cached, it is reused for free.
+Embedding resumes per chunk: the cache is written per `ingestion.chunk_size` slice of
+the corpus, so a crash partway through a long embedding pass loses at most one chunk.
+MUVERA document encoding runs across `ingestion.muvera_workers` processes.
 
 ---
 

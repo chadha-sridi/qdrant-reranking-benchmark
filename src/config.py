@@ -48,6 +48,13 @@ class ExecutionConfig(_Frozen):
     # of the final rescored ranking. Real added wall-clock cost (roughly doubles those
     # two arms' own query-side work), no effect on any recorded latency.
     capture_pool_recall: bool = True
+    # A cross-encoder scores each (query, document) pair independently of the pool, so
+    # within one query the depth sweep and the two cross-encoder arms keep re-meeting
+    # the same pairs. With sharing on, a pair is scored once per query and its measured
+    # cost is attributed to every unit that uses it; rankings are identical and
+    # `t_rerank_ms` stays a measured per-pair figure (throughput is depth-independent:
+    # 28.6-29.1 pairs/s at depths 10-500). False restores fully isolated executions.
+    share_pointwise_scores: bool = True
 
     @model_validator(mode="after")
     def _check(self) -> ExecutionConfig:
@@ -109,6 +116,9 @@ class IngestionConfig(_Frozen):
     # peak embedding memory to one chunk regardless of corpus size, independently of
     # embedding/upload batch sizes (model throughput and Qdrant's payload limit).
     chunk_size: int
+    # Worker processes for MUVERA document encoding, which is NumPy-light per document
+    # and otherwise serial. 0 = one per CPU, scaled down for small corpora.
+    muvera_workers: int = 0
 
 
 class ArmsConfig(_Frozen):
@@ -252,6 +262,9 @@ class MuveraModel(_Frozen):
     # deepest candidate depth. A project convention, not a published standard.
     min_recall: float = 0.8
     tuning_grid: MuveraTuningGrid | None = None
+    # Set only by `run --allow-uncalibrated-muvera`, for measuring the arm end to end
+    # before a setting is chosen. Recorded in the manifest with the rest of this block.
+    allow_uncalibrated: bool = False
 
     @property
     def n_partitions(self) -> int:

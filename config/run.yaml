@@ -37,6 +37,13 @@ execution:
   # prefetch stage. Real added wall-clock cost (roughly doubles those arms' own
   # query-side work); no effect on any recorded latency. Set false to skip it and run faster.
   capture_pool_recall: true
+  # A cross-encoder scores each (query, document) pair independently of the pool, so one
+  # query's depth sweep and both cross-encoder arms keep re-meeting the same pairs. With
+  # sharing on, a pair is scored once per query and its measured cost is attributed to
+  # every unit that uses it: identical rankings, ~45% less cross-encoder wall-clock, and
+  # t_rerank_ms stays a measured per-pair figure (throughput is depth-independent,
+  # 28.6-29.1 pairs/s at depths 10-500). Set false for fully isolated executions.
+  share_pointwise_scores: true
 
 qdrant:
   url: "http://localhost:6333"
@@ -74,6 +81,9 @@ ingestion:
   # ~600 MB, independent of corpus size — Quora's 522,931 docs would otherwise need the
   # full corpus resident across dense+late_interaction+muvera at once.
   chunk_size: 10000
+  # Worker processes for MUVERA document encoding, which is otherwise a serial
+  # per-document loop. 0 = one per CPU, scaled down automatically for small corpora.
+  muvera_workers: 0
 
 # Two first stages, each a baseline that the arms below rerank: dense (bge-small) and
 # sparse (BM25). An arm is named after its first stage, so both families run in one

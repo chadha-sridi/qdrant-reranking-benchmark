@@ -112,7 +112,12 @@ def embed_corpus(
             if source is None:
                 raise RuntimeError("muvera requires late_interaction token embeddings")
             start = time.perf_counter()
-            cached_muvera = np.stack([muvera.process_document(d) for d in source]).astype(np.float32)
+            from .muvera import encode_documents
+
+            cached_muvera = encode_documents(
+                cfg.models.muvera, cfg.models.late_interaction.dim, cfg.run.seeds.muvera,
+                source, workers=cfg.run.ingestion.muvera_workers or None,
+            )
             out.timings["muvera"] = time.perf_counter() - start
             cache.save_dense(
                 key,
@@ -591,9 +596,12 @@ def _embed_chunk(
         if cached_muvera is None:
             if cached_late_interaction is None:
                 raise RuntimeError("muvera requires late_interaction token embeddings")
-            cached_muvera = np.stack(
-                [muvera.process_document(d) for d in cached_late_interaction]
-            ).astype(np.float32)
+            from .muvera import encode_documents
+
+            cached_muvera = encode_documents(
+                cfg.models.muvera, cfg.models.late_interaction.dim, cfg.run.seeds.muvera,
+                cached_late_interaction, workers=cfg.run.ingestion.muvera_workers or None,
+            )
             cache.save_dense(
                 key,
                 cached_muvera,

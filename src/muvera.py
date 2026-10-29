@@ -12,6 +12,8 @@ Defaults match fastembed's own: `k_sim=5, dim_proj=16, r_reps=20` -> output dime
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -19,6 +21,51 @@ import numpy as np
 
 from .config import MuveraModel
 from .platform_info import stable_digest
+
+# Set once per worker process by _init_worker; the matrices are deterministic in
+# (config, token_dim, seed), so every worker holds the same encoder.
+_WORKER_MUVERA = None
+
+
+def _init_worker(cfg_dump: dict, token_dim: int, seed: int) -> None:
+    global _WORKER_MUVERA
+    _WORKER_MUVERA = build_muvera(MuveraModel(**cfg_dump), token_dim, seed)
+
+
+def _encode_slice(doc_tokens: list[np.ndarray]) -> np.ndarray:
+    return np.stack([_WORKER_MUVERA.process_document(d) for d in doc_tokens]).astype(np.float32)
+
+
+def encode_documents(
+    cfg: MuveraModel,
+    token_dim: int,
+    seed: int,
+    doc_tokens: Sequence[np.ndarray],
+    *,
+    workers: int | None = None,
+) -> np.ndarray:
+    """FDE-encode a corpus, split across worker processes.
+
+    `process_document` is NumPy-light per document, so a plain loop runs on one core.
+    Documents are encoded independently, and the matrices rebuild deterministically from
+    (config, token_dim, seed), so the split cannot change any output. `workers=None`
+    picks one per CPU, scaled down so small corpora stay serial.
+    """
+    doc_tokens = list(doc_tokens)
+    if not doc_tokens:
+        return np.zeros((0, cfg.dim), dtype=np.float32)
+    if workers is None:
+        workers = min(os.cpu_count() or 1, max(1, len(doc_tokens) // 256))
+    if workers <= 1:
+        muvera = build_muvera(cfg, token_dim, seed)
+        return np.stack([muvera.process_document(d) for d in doc_tokens]).astype(np.float32)
+    bounds = np.linspace(0, len(doc_tokens), workers + 1, dtype=int)
+    slices = [doc_tokens[a:b] for a, b in zip(bounds, bounds[1:]) if b > a]
+    with ProcessPoolExecutor(
+        max_workers=len(slices), initializer=_init_worker,
+        initargs=(cfg.model_dump(), token_dim, seed),
+    ) as pool:
+        return np.concatenate(list(pool.map(_encode_slice, slices)), axis=0)
 
 
 def build_muvera(cfg: MuveraModel, token_dim: int, seed: int):
@@ -85,6 +132,52 @@ def chamfer_similarity(query_tokens: np.ndarray, doc_tokens: np.ndarray) -> floa
     return float(sims.max(axis=1).sum())
 
 
+def chamfer_blocks(
+    doc_tokens: Sequence[np.ndarray], max_block_tokens: int = 1_000_000
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Corpus token matrices packed for `exact_chamfer_scores`, bounded per block.
+
+    Each block is (concatenated tokens, per-document start offsets); the block budget
+    caps the similarity matrix one query allocates at ~128 MB for a 32-token query.
+    """
+    blocks: list[tuple[np.ndarray, np.ndarray]] = []
+    pending: list[np.ndarray] = []
+    pending_tokens = 0
+
+    def pack() -> None:
+        lens = np.array([d.shape[0] for d in pending], dtype=np.int64)
+        starts = np.zeros(len(pending), dtype=np.int64)
+        np.cumsum(lens[:-1], out=starts[1:])
+        blocks.append((np.concatenate(pending, axis=0), starts))
+        pending.clear()
+
+    for doc in doc_tokens:
+        doc = np.asarray(doc, dtype=np.float32)
+        if doc.shape[0] == 0:
+            raise ValueError("cannot score an empty document multivector")
+        pending.append(doc)
+        pending_tokens += doc.shape[0]
+        if pending_tokens >= max_block_tokens:
+            pack()
+            pending_tokens = 0
+    if pending:
+        pack()
+    return blocks
+
+
+def exact_chamfer_scores(
+    query_tokens: np.ndarray, blocks: Sequence[tuple[np.ndarray, np.ndarray]]
+) -> np.ndarray:
+    """Every document's exact max_sim score for one query, equal to
+    `chamfer_similarity` per document but computed corpus-at-a-time."""
+    query = np.asarray(query_tokens, dtype=np.float32)
+    parts = []
+    for tokens, starts in blocks:
+        sims = query @ tokens.T
+        parts.append(np.maximum.reduceat(sims, starts, axis=1).sum(axis=0))
+    return np.concatenate(parts)
+
+
 @dataclass(frozen=True)
 class CalibrationResult:
     n_queries: int
@@ -108,20 +201,23 @@ class CalibrationResult:
 
 
 def calibrate(
-    muvera,
+    muvera_cfg: MuveraModel,
+    token_dim: int,
+    seed: int,
     doc_tokens: list[np.ndarray],
     query_tokens: list[np.ndarray],
     *,
     depths: Sequence[int] = (10, 50, 100, 200),
     truth_k: int = 10,
+    workers: int | None = None,
 ) -> CalibrationResult:
     """Measure how well the FDE recovers the exact max_sim top-k, against a bag baseline.
 
     MUVERA is a prefetch, so what matters is whether the true max_sim top-k survives
-    into the candidate set — not whether the scores correlate. `muvera` is a
-    `fastembed.postprocess.Muvera` instance; `process_document`/`process_query` are its
-    asymmetric encode methods (fill_empty_clusters + normalize_by_count differ between
-    the two, matching the MUVERA paper's aggregation).
+    into the candidate set — not whether the scores correlate. The encoder is built from
+    (muvera_cfg, token_dim, seed); documents are FDE-encoded in parallel and queries with
+    fastembed's asymmetric `process_query` (fill_empty_clusters + normalize_by_count
+    differ between the two sides, matching the MUVERA paper's aggregation).
 
     Must be run on REAL embeddings: isotropic random vectors give SimHash no cluster
     structure to exploit, so synthetic data cannot validate an FDE at any parameter
@@ -129,15 +225,17 @@ def calibrate(
     """
     from scipy.stats import spearmanr
 
-    encoded_docs = np.stack([muvera.process_document(d) for d in doc_tokens])
+    muvera = build_muvera(muvera_cfg, token_dim, seed)
+    encoded_docs = encode_documents(muvera_cfg, token_dim, seed, doc_tokens, workers=workers)
     bag_docs = np.stack([np.asarray(d, dtype=np.float32).sum(axis=0) for d in doc_tokens])
+    blocks = chamfer_blocks(doc_tokens)
 
     recall = {depth: 0.0 for depth in depths}
     bag_recall = {depth: 0.0 for depth in depths}
     rhos: list[float] = []
 
     for query in query_tokens:
-        exact = np.array([chamfer_similarity(query, doc) for doc in doc_tokens])
+        exact = exact_chamfer_scores(query, blocks)
         truth = set(np.argsort(-exact)[:truth_k].tolist())
 
         approx = encoded_docs @ muvera.process_query(query)

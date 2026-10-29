@@ -58,6 +58,11 @@ class QueryTimers:
     def rerank(self):
         return self._accumulate("t_rerank_ms")
 
+    def add_rerank_time(self, seconds: float) -> None:
+        """Accumulate rerank cost measured outside the context manager (shared pointwise
+        scoring attributes each pair's measured cost to every unit that uses the pair)."""
+        self.t_rerank_ms += seconds * 1000.0
+
     def add_server_time(self, seconds: float | None) -> None:
         """Accumulate Qdrant's reported time for one call, in milliseconds."""
         if seconds is None:
