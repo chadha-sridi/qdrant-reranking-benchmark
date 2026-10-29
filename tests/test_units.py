@@ -108,12 +108,39 @@ def test_muvera_calibration_counts_only_for_the_model_it_was_calibrated_on(tmp_p
 
     artifact = cfg.paths["agg"] / "nfcorpus__muvera_calibration.json"
     artifact.parent.mkdir(parents=True)
-    passing = {"beats_bag_of_tokens": True, "recall_at": {"100": 0.9}}
+    muvera = cfg.models.muvera
+    settings = {"k_sim": muvera.k_sim, "n_reps": muvera.n_reps, "d_proj": muvera.d_proj}
+    passing = {"beats_bag_of_tokens": True, "recall_at": {"100": 0.9}, "config": settings}
     artifact.write_text(json.dumps(passing | {"late_interaction_model": "some/other-model"}))
     ok, reason = muvera_calibration_status(cfg, "nfcorpus")
     assert not ok and "some/other-model" in reason
     artifact.write_text(json.dumps(passing | {"late_interaction_model": model}))
     assert muvera_calibration_status(cfg, "nfcorpus")[0]
+
+    retuned = passing | {"late_interaction_model": model, "config": settings | {"k_sim": 6}}
+    artifact.write_text(json.dumps(retuned))
+    ok, reason = muvera_calibration_status(cfg, "nfcorpus")
+    assert not ok and "calibrated with" in reason
+
+    below = passing | {"late_interaction_model": model, "recall_at": {"100": muvera.min_recall - 0.01}}
+    artifact.write_text(json.dumps(below))
+    assert not muvera_calibration_status(cfg, "nfcorpus")[0]
+
+
+def test_dense_onnx_source_gets_its_own_identity_and_registers_once():
+    """A custom file must never share a name, and so cached embeddings, with the build
+    FastEmbed ships under the same model."""
+    from fastembed import TextEmbedding
+
+    from src.embedding import _register_onnx_source
+
+    dense = load_config().models.dense
+    assert dense.onnx is not None and dense.model_id != dense.name
+    assert dense.model_copy(update={"onnx": None}).model_id == dense.name
+    _register_onnx_source(dense)
+    _register_onnx_source(dense)
+    names = [entry["model"] for entry in TextEmbedding.list_supported_models()]
+    assert names.count(dense.model_id) == 1
 
 
 def test_execution_config_rejects_depth_below_final_limit():

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Optional
 
+import numpy as np
 import typer
 
 from .analysis import analyse_dataset, combine_datasets
@@ -103,7 +104,11 @@ def run(
         cfg = cfg.model_copy(
             update={
                 "models": cfg.models.model_copy(
-                    update={"dense": cfg.models.dense.model_copy(update={"name": dense_model, "dim": dim})}
+                    update={
+                        "dense": cfg.models.dense.model_copy(
+                            update={"name": dense_model, "dim": dim, "onnx": None}
+                        )
+                    }
                 )
             }
         )
@@ -332,11 +337,122 @@ def memory(
     _echo(json.dumps(memory_read.as_dict(), indent=2, sort_keys=True))
 
 
+@app.command("tune-muvera")
+def tune_muvera(
+    results_dir: Annotated[
+        Optional[str],
+        typer.Option(help="Write the tuning record and query splits under this directory instead of results/"),
+    ] = None,
+) -> None:
+    """Sweep models.yaml's pre-declared MUVERA grid on held-out warmup queries.
+
+    Each setting is scored by how much of the exact max_sim top-k its FDE recovers at
+    every candidate depth, and its stored size per document is compared with the
+    late-interaction multivectors it prefetches for. The selected setting is the
+    smallest FDE that reaches muvera.min_recall at the deepest depth on every tuning
+    dataset. Evaluated queries are never used.
+    """
+    from itertools import product
+
+    from src.muvera import build_muvera, calibrate, calibration_inputs
+
+    cfg = load_config()
+    if results_dir:
+        cfg = cfg.with_results_dir(results_dir)
+    muvera_cfg = cfg.models.muvera
+    grid = muvera_cfg.tuning_grid
+    if grid is None:
+        raise typer.BadParameter("models.yaml muvera.tuning_grid is not set")
+    token_dim = cfg.models.late_interaction.dim
+    settings = sorted(
+        (
+            muvera_cfg.model_copy(update={"k_sim": k_sim, "d_proj": d_proj, "n_reps": n_reps})
+            for k_sim, d_proj, n_reps in product(grid.k_sim, grid.d_proj, grid.n_reps)
+        ),
+        key=lambda m: (m.dim, m.k_sim, m.d_proj, m.n_reps),
+    )
+    encoders = build_encoders(cfg)
+
+    rows: list[dict] = []
+    for dataset in grid.datasets:
+        bundle = load_dataset_bundle(cfg, dataset)
+        doc_tokens, query_tokens = calibration_inputs(cfg, bundle, encoders)
+        multivector_bytes = float(np.mean([len(d) for d in doc_tokens])) * token_dim * 4
+        depths = tuple(cfg.depths_for(dataset))
+        _echo(
+            f"\n{dataset}: {len(doc_tokens)} documents, {len(query_tokens)} held-out warmup "
+            f"queries; multivectors {multivector_bytes / 1024:.0f} KB per document"
+        )
+        for setting in settings:
+            result = calibrate(
+                build_muvera(setting, token_dim, cfg.run.seeds.muvera),
+                doc_tokens,
+                query_tokens,
+                depths=depths,
+                truth_k=cfg.run.execution.final_limit,
+            )
+            fde_bytes = setting.dim * 4
+            rows.append(
+                {
+                    "dataset": dataset,
+                    "k_sim": setting.k_sim,
+                    "d_proj": setting.d_proj,
+                    "n_reps": setting.n_reps,
+                    "dim": setting.dim,
+                    "fde_bytes_per_doc": fde_bytes,
+                    "multivector_bytes_per_doc": multivector_bytes,
+                    "larger_than_multivectors": fde_bytes > multivector_bytes,
+                    "recall_at_deepest": result.recall_at[max(depths)],
+                    "passes": result.beats_bag_of_tokens
+                    and result.recall_at[max(depths)] >= muvera_cfg.min_recall,
+                    **result.as_dict(),
+                }
+            )
+            row = rows[-1]
+            _echo(
+                f"  k_sim={setting.k_sim} d_proj={setting.d_proj:<2d} n_reps={setting.n_reps:<2d} "
+                f"dim={setting.dim:<6d} {fde_bytes / 1024:4.0f} KB"
+                f"{' > multivectors' if row['larger_than_multivectors'] else '               '} "
+                + " ".join(f"r@{d}={result.recall_at[d]:.2f}" for d in depths)
+                + ("  PASS" if row["passes"] else "")
+            )
+
+    def passes_everywhere(setting) -> bool:
+        return all(
+            row["passes"]
+            for row in rows
+            if (row["k_sim"], row["d_proj"], row["n_reps"])
+            == (setting.k_sim, setting.d_proj, setting.n_reps)
+        )
+
+    selected = next((s for s in settings if passes_everywhere(s)), None)
+    record = {
+        "late_interaction_model": cfg.models.late_interaction.name,
+        "grid": grid.model_dump(),
+        "min_recall": muvera_cfg.min_recall,
+        "rule": "smallest FDE whose recall@deepest-depth reaches min_recall and beats "
+        "bag-of-tokens on every tuning dataset, on held-out warmup queries",
+        "selected": None
+        if selected is None
+        else {"k_sim": selected.k_sim, "d_proj": selected.d_proj, "n_reps": selected.n_reps, "dim": selected.dim},
+        "rows": rows,
+    }
+    out = cfg.paths["agg"] / "muvera_tuning.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(record, indent=2, sort_keys=True))
+    if selected is None:
+        _echo(f"\nno setting in the grid reaches recall {muvera_cfg.min_recall:.2f} on every tuning dataset")
+    else:
+        _echo(
+            f"\nselected: k_sim={selected.k_sim} d_proj={selected.d_proj} "
+            f"n_reps={selected.n_reps} (dim {selected.dim})"
+        )
+    _echo(f"[tuning] {out}")
+
+
 @app.command("calibrate-muvera")
 def calibrate_muvera(
     dataset: Annotated[str, typer.Option()] = "nfcorpus",
-    n_docs: Annotated[int, typer.Option(help="Corpus slice to calibrate against")] = 2000,
-    n_queries: Annotated[int, typer.Option()] = 25,
     results_dir: Annotated[
         Optional[str],
         typer.Option(help="Write the calibration artifact and query split under this directory instead of results/"),
@@ -344,11 +460,12 @@ def calibrate_muvera(
 ) -> None:
     """Measure FDE prefetch recall against exact max_sim on REAL late-interaction embeddings.
 
-    Required before publishing any muvera number. Synthetic vectors cannot validate the
-    encoder: on isotropic random tokens the FDE cannot beat a plain summed-token dot
-    product at any parameter setting.
+    Runs over the whole corpus and the dataset's held-out warmup queries. Required before
+    publishing any muvera number. Synthetic vectors cannot validate the encoder: on
+    isotropic random tokens the FDE cannot beat a plain summed-token dot product at any
+    parameter setting.
     """
-    from src.muvera import calibrate
+    from src.muvera import calibrate, calibration_inputs
 
     cfg = load_config()
     if results_dir:
@@ -356,11 +473,8 @@ def calibrate_muvera(
     encoders = build_encoders(cfg)
     bundle = load_dataset_bundle(cfg, dataset)
 
-    docs = [doc.text for doc in bundle.documents[:n_docs]]
-    query_ids = sorted(bundle.eval_queries())[:n_queries]
-    _echo(f"embedding {len(docs)} documents and {len(query_ids)} queries with the late-interaction model...")
-    doc_tokens = encoders.embed_docs_late_interaction(docs)
-    query_tokens = [encoders.embed_query_late_interaction(bundle.queries[qid]) for qid in query_ids]
+    doc_tokens, query_tokens = calibration_inputs(cfg, bundle, encoders)
+    _echo(f"{len(doc_tokens)} documents, {len(query_tokens)} held-out warmup queries")
 
     result = calibrate(
         encoders.muvera,
@@ -372,7 +486,8 @@ def calibrate_muvera(
     payload = result.as_dict() | {
         "config": cfg.models.muvera.model_dump(),
         "late_interaction_model": cfg.models.late_interaction.name,
-        "corpus": f"{dataset} first {n_docs} documents",
+        "corpus": f"{dataset}, all {len(doc_tokens)} documents",
+        "queries": f"{len(query_tokens)} held-out warmup queries",
     }
     out = cfg.paths["agg"] / f"{dataset}__muvera_calibration.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -393,10 +508,6 @@ def calibrate_muvera(
         )
     else:
         _echo(f"\n[calibration] {out}")
-        _echo(
-            "Set models.yaml muvera.calibrated: true and calibrated_model: "
-            f"{cfg.models.late_interaction.name!r} only if the recall above is usable."
-        )
 
 
 @app.command()

@@ -18,21 +18,11 @@ import pytest
 
 pytestmark = [pytest.mark.gate, pytest.mark.slow]
 
-N_DOCS = 2000
-N_QUERIES = 25
-
-
 @pytest.fixture(scope="module")
 def calibration(cfg, nfcorpus, encoders):
-    from src.muvera import calibrate
+    from src.muvera import calibrate, calibration_inputs
 
-    docs = [doc.text for doc in nfcorpus.documents[:N_DOCS]]
-    query_ids = sorted(nfcorpus.eval_queries())[:N_QUERIES]
-    queries = [nfcorpus.queries[qid] for qid in query_ids]
-
-    doc_tokens = encoders.embed_docs_late_interaction(docs)
-    query_tokens = [encoders.embed_query_late_interaction(text) for text in queries]
-
+    doc_tokens, query_tokens = calibration_inputs(cfg, nfcorpus, encoders)
     result = calibrate(
         encoders.muvera,
         doc_tokens,
@@ -40,13 +30,12 @@ def calibration(cfg, nfcorpus, encoders):
         depths=tuple(cfg.depths_for("nfcorpus")),  # nfcorpus's own (deeper) sweep, not the global default
         truth_k=cfg.run.execution.final_limit,
     )
-    path = cfg.paths["agg"] / f"{nfcorpus.spec.name}__muvera_calibration.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = result.as_dict() | {
         "config": cfg.models.muvera.model_dump(),
-        "corpus": f"nfcorpus first {N_DOCS} documents",
+        "late_interaction_model": cfg.models.late_interaction.name,
+        "corpus": f"nfcorpus, all {len(doc_tokens)} documents",
+        "queries": f"{len(query_tokens)} held-out warmup queries",
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     print(json.dumps(payload, indent=2, sort_keys=True))
     return result
 
@@ -66,7 +55,7 @@ def test_muvera_prefetch_recall_is_usable_at_sweep_depths(cfg, calibration):
     """A prefetch that loses the true top-10 makes the whole depth curve meaningless."""
     deepest = max(cfg.depths_for("nfcorpus"))
     recall = calibration.recall_at[deepest]
-    assert recall >= 0.8, (
+    assert recall >= cfg.models.muvera.min_recall, (
         f"MUVERA calibration FAILED: at the deepest sweep depth ({deepest}) the FDE "
         f"prefetch recovers only {recall:.2%} of the exact max_sim top-"
         f"{cfg.run.execution.final_limit}. `muvera_late_interaction_rescore` would measure the FDE's "

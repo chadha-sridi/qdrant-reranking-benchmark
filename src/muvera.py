@@ -64,6 +64,21 @@ def matrices_digest(muvera, cfg: MuveraModel, token_dim: int) -> str:
     )
 
 
+def calibration_inputs(cfg, bundle, encoders) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Every document's late-interaction tokens and the held-out warmup queries' tokens.
+
+    Calibration and tuning use only warmup queries, which are never evaluated, so no
+    reported number comes from a query the FDE was checked or tuned on.
+    """
+    from .indexing import late_interaction_corpus
+
+    doc_tokens = late_interaction_corpus(cfg, bundle, encoders)
+    query_tokens = [
+        encoders.embed_query_late_interaction(bundle.all_queries[qid]) for qid in bundle.warmup_ids
+    ]
+    return doc_tokens, query_tokens
+
+
 def chamfer_similarity(query_tokens: np.ndarray, doc_tokens: np.ndarray) -> float:
     """Exact max_sim / Chamfer score. The quantity the FDE approximates."""
     sims = np.asarray(query_tokens, dtype=np.float32) @ np.asarray(doc_tokens, dtype=np.float32).T

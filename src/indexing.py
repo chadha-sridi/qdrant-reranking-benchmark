@@ -67,7 +67,7 @@ def embed_corpus(
     if needs_dense:
         key = cache.key(
             representation="dense",
-            model_name=cfg.models.dense.name,
+            model_name=cfg.models.dense.model_id,
             dataset=name,
             corpus_digest=digest,
         )
@@ -76,7 +76,7 @@ def embed_corpus(
             start = time.perf_counter()
             cached = encoders.embed_docs_dense(texts)
             out.timings["dense"] = time.perf_counter() - start
-            cache.save_dense(key, cached, {"model": cfg.models.dense.name, "dataset": name})
+            cache.save_dense(key, cached, {"model": cfg.models.dense.model_id, "dataset": name})
         out.dense = cached
 
     if needs_late_interaction:
@@ -112,7 +112,7 @@ def embed_corpus(
             if source is None:
                 raise RuntimeError("muvera requires late_interaction token embeddings")
             start = time.perf_counter()
-            cached_muvera = np.stack([muvera.process_document(d) for d in source])
+            cached_muvera = np.stack([muvera.process_document(d) for d in source]).astype(np.float32)
             out.timings["muvera"] = time.perf_counter() - start
             cache.save_dense(
                 key,
@@ -279,7 +279,7 @@ def collection_metadata(cfg: Config, representations: Sequence[str]) -> dict[str
     """
     meta: dict[str, Any] = {}
     if "dense" in representations:
-        meta["dense_model"] = cfg.models.dense.name
+        meta["dense_model"] = cfg.models.dense.model_id
     if "late_interaction" in representations or "muvera" in representations:
         meta["late_interaction_model"] = cfg.models.late_interaction.name
     if "muvera" in representations:
@@ -546,7 +546,7 @@ def _embed_chunk(
     if needs_dense:
         key = cache.key(
             representation="dense",
-            model_name=cfg.models.dense.name,
+            model_name=cfg.models.dense.model_id,
             dataset=name,
             corpus_digest=digest,
             extra={"chunk_start": chunk_start, "chunk_end": chunk_end},
@@ -554,7 +554,7 @@ def _embed_chunk(
         cached = cache.load_dense(key)
         if cached is None:
             cached = encoders.embed_docs_dense(texts)
-            cache.save_dense(key, cached, {"model": cfg.models.dense.name, "dataset": name})
+            cache.save_dense(key, cached, {"model": cfg.models.dense.model_id, "dataset": name})
         out.dense = cached
 
     if needs_late_interaction:
@@ -591,7 +591,9 @@ def _embed_chunk(
         if cached_muvera is None:
             if cached_late_interaction is None:
                 raise RuntimeError("muvera requires late_interaction token embeddings")
-            cached_muvera = np.stack([muvera.process_document(d) for d in cached_late_interaction])
+            cached_muvera = np.stack(
+                [muvera.process_document(d) for d in cached_late_interaction]
+            ).astype(np.float32)
             cache.save_dense(
                 key,
                 cached_muvera,
@@ -600,6 +602,22 @@ def _embed_chunk(
         out.muvera = cached_muvera
 
     return out
+
+
+def late_interaction_corpus(
+    cfg: Config, bundle: LoadedDataset, encoders: Encoders
+) -> list[np.ndarray]:
+    """Every document's late-interaction tokens, in corpus order, from the chunk cache
+    `run` writes; chunks not cached yet are embedded and cached."""
+    cache = EmbeddingCache(cfg.paths["cache"])
+    tokens: list[np.ndarray] = []
+    for chunk_start, chunk_end in _chunk_bounds(len(bundle.documents), cfg.run.ingestion.chunk_size):
+        chunk = _embed_chunk(
+            cfg, bundle, encoders, ["late_interaction"], cache,
+            chunk_start=chunk_start, chunk_end=chunk_end,
+        )
+        tokens.extend(chunk.require("late_interaction"))
+    return tokens
 
 
 def ingest_corpus(

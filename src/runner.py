@@ -83,7 +83,7 @@ def plan_digest(cfg: Config, bundle: LoadedDataset, units: Sequence[Unit]) -> st
             "seeds": cfg.run.seeds.model_dump(),
             "execution": cfg.run.execution.model_dump(),
             "models": {
-                "dense": cfg.models.dense.name,
+                "dense": cfg.models.dense.model_id,
                 "bm25": cfg.models.bm25.model_dump(exclude={"reference"}),
                 "late_interaction": cfg.models.late_interaction.name,
                 "cross_encoder": cfg.models.cross_encoder.name,

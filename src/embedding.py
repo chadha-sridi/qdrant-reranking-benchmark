@@ -15,7 +15,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 
-from .config import Config, ModelsConfig
+from .config import Config, DenseModel, ModelsConfig
 from .muvera import build_muvera
 from .platform_info import assert_same_platform, current_platform, file_digest, stable_digest
 
@@ -39,7 +39,10 @@ class Encoders:
         if self._dense is None:
             from fastembed import TextEmbedding
 
-            self._dense = TextEmbedding(model_name=self.models.dense.name)
+            dense = self.models.dense
+            if dense.onnx is not None:
+                _register_onnx_source(dense)
+            self._dense = TextEmbedding(model_name=dense.model_id)
         return self._dense
 
     @property
@@ -101,6 +104,22 @@ class Encoders:
                 except OSError:
                     continue
         return digests
+
+
+def _register_onnx_source(dense: DenseModel) -> None:
+    from fastembed import TextEmbedding
+    from fastembed.common.model_description import ModelSource, PoolingType
+
+    if any(entry["model"] == dense.model_id for entry in TextEmbedding.list_supported_models()):
+        return
+    TextEmbedding.add_custom_model(
+        model=dense.model_id,
+        pooling=PoolingType[dense.onnx.pooling.upper()],
+        normalization=dense.onnx.normalize,
+        sources=ModelSource(hf=dense.onnx.hf),
+        dim=dense.dim,
+        model_file=dense.onnx.file,
+    )
 
 
 def _fastembed_cache_roots() -> list[Path]:

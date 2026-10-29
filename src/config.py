@@ -156,12 +156,34 @@ class QualityReference(_Frozen):
     observed: float | None = None
 
 
+class OnnxSource(_Frozen):
+    """An ONNX file FastEmbed does not ship, registered with FastEmbed as a custom model."""
+
+    hf: str
+    file: str
+    pooling: Literal["cls", "mean"]
+    normalize: bool
+
+
 class DenseModel(_Frozen):
     name: str
     dim: int
     distance: Literal["cosine", "dot", "euclid"]
     max_length: int
     reference: QualityReference
+    onnx: OnnxSource | None = None
+
+    @property
+    def model_id(self) -> str:
+        """The model's FastEmbed name, and its identity in cache keys and manifests.
+
+        A custom ONNX source gets its own name, since FastEmbed refuses to register a
+        second file under a model it already ships, and a different file must never
+        share cached embeddings with it.
+        """
+        if self.onnx is None:
+            return self.name
+        return f"{self.name} ({self.onnx.hf}:{self.onnx.file})"
 
 
 class Bm25Model(_Frozen):
@@ -198,6 +220,15 @@ class LateInteractionModel(_Frozen):
         return self
 
 
+class MuveraTuningGrid(_Frozen):
+    """Settings `tune-muvera` sweeps, declared before any result is seen."""
+
+    k_sim: list[int]
+    d_proj: list[int]
+    n_reps: list[int]
+    datasets: list[str]
+
+
 class MuveraModel(_Frozen):
     """Parameters for fastembed.postprocess.Muvera.
 
@@ -217,6 +248,10 @@ class MuveraModel(_Frozen):
     # model.
     calibrated_model: str | None = None
     calibration_note: str | None = None
+    # Fraction of the exact max_sim top-k the FDE prefetch must recover at a dataset's
+    # deepest candidate depth. A project convention, not a published standard.
+    min_recall: float = 0.8
+    tuning_grid: MuveraTuningGrid | None = None
 
     @property
     def n_partitions(self) -> int:

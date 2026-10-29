@@ -473,6 +473,15 @@ def muvera_calibration_status(cfg: Config, dataset: str) -> tuple[bool, str]:
             f"Run `calibrate-muvera --dataset {dataset}` with this model."
         )
 
+    muvera = cfg.models.muvera
+    wanted = {"k_sim": muvera.k_sim, "n_reps": muvera.n_reps, "d_proj": muvera.d_proj}
+    used = {key: (payload.get("config") or {}).get(key) for key in wanted}
+    if used != wanted:
+        return False, (
+            f"not calibrated: {path} was calibrated with {used}, not the configured {wanted}. "
+            f"Run `calibrate-muvera --dataset {dataset}` again."
+        )
+
     if not payload.get("beats_bag_of_tokens"):
         return False, f"not calibrated: {path} shows the FDE does not beat bag-of-tokens"
 
@@ -481,10 +490,10 @@ def muvera_calibration_status(cfg: Config, dataset: str) -> tuple[bool, str]:
         return False, f"not calibrated: {path} has no recall_at data"
     deepest = max(int(k) for k in recall_at)
     recall = recall_at[str(deepest)]
-    if recall < 0.8:
+    if recall < muvera.min_recall:
         return False, (
             f"not calibrated: {path} shows recall@{deepest}={recall:.2f}, below the "
-            "0.80 threshold"
+            f"{muvera.min_recall:.2f} threshold"
         )
     return True, f"{path}: recall@{deepest}={recall:.2f}, beats bag-of-tokens"
 

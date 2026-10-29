@@ -38,10 +38,10 @@ Experiments can be run at different candidate depths to see how each strategy sc
 - **Network access** to Hugging Face Hub, for both the BEIR datasets and the model
   weights. No account or token is required; you'll see a harmless "unauthenticated
   requests" rate-limit warning.
-- No GPU required or used — everything runs CPU-side (ONNX Runtime via FastEmbed).
-  Note that FastEmbed serves its own ONNX conversions, which for some models are
-  quantized rather than full precision — relevant if you compare a score here against
-  a published PyTorch figure (see [Validation gates](#validation-gates)).
+- No GPU required or used — everything runs CPU-side (ONNX Runtime via FastEmbed), and
+  every model runs in float32. The dense model is BAAI's own float32 ONNX export,
+  registered with FastEmbed as a custom model, because FastEmbed ships it only as a
+  float16 build that runs single-threaded on CPUs without float16 arithmetic.
 
 There is deliberately **no fixed target machine**. `docker-compose.yml` runs Qdrant
 native to whatever host executes it — an Apple
@@ -114,8 +114,8 @@ config/
 └── datasets.yaml       per-dataset HF source, size, representations, depth overrides
 
 src/
-├── cli.py              the `run`/`aggregate`/`memory`/`calibrate-muvera`/`plan`/
-│                       `doctor` commands
+├── cli.py              the `run`/`aggregate`/`memory`/`tune-muvera`/
+│                       `calibrate-muvera`/`plan`/`doctor` commands
 ├── config.py            typed, validated config — nothing else reads YAML directly
 ├── datasets.py          BEIR loading, query subsampling, warmup holdout,
 │                       bidirectional doc_id <-> Qdrant point-id mapping
@@ -653,17 +653,32 @@ python -m src.cli memory --dataset nfcorpus
 Builds (or reuses) the dataset's collection, reads Qdrant's per-vector memory
 accounting off it, and prints the record as JSON.
 
+### `tune-muvera` — choose the FDE setting on held-out queries
+
+```bash
+python -m src.cli tune-muvera
+```
+
+Sweeps the grid declared in `models.yaml` (`muvera.tuning_grid`) on the tuning datasets'
+held-out warmup queries, which are never evaluated. For every setting it reports how much
+of the exact `max_sim` top-10 the FDE recovers at each candidate depth, and whether its
+stored size per document exceeds the late-interaction multivectors it prefetches for. It
+selects the smallest FDE that reaches `muvera.min_recall` (0.80, a project convention)
+at the deepest depth on every tuning dataset, and writes `agg/muvera_tuning.json`.
+
 ### `calibrate-muvera` — validate the FDE on real embeddings
 
 ```bash
-python -m src.cli calibrate-muvera --dataset nfcorpus --n-docs 2000 --n-queries 25
+python -m src.cli calibrate-muvera --dataset nfcorpus
 ```
 
 Required before trusting any `muvera_late_interaction_rescore` number — see
 [Known limitations](#known-limitations). Compares FDE-prefetch recall against exact
-`max_sim` and against a trivial bag-of-tokens baseline on real late-interaction embeddings.
-`--results-dir` works as for `run`: the artifact is written where that run's
-`muvera_late_interaction_rescore` gate reads it.
+`max_sim` and against a trivial bag-of-tokens baseline, over the whole corpus and the
+dataset's held-out warmup queries. Run it per dataset with the configured setting: the
+`muvera_late_interaction_rescore` gate accepts the artifact only for the configured
+late-interaction model and MUVERA settings. `--results-dir` works as for `run`: the
+artifact is written where that run's gate reads it.
 
 ### `plan` — print the execution plan, touch nothing
 
@@ -739,17 +754,13 @@ and a live Qdrant.
 | **2** `test_gate2_arms_distinct` | No two arms return identical rankings, and every registered arm either runs or is excluded with a stated reason. Catches an arm silently collapsing into its own prefetch. | ✅ passes |
 | **3** `test_gate3_hnsw_variance` | Two independent index builds of the same vectors agree within 0.005 NDCG@10. Establishes the noise floor below which no arm-to-arm difference is interpretable. | ✅ passes |
 | **4** `test_gate4_unattended` | The pipeline runs end to end on a 5-query, 2-depth subset, resumes idempotently, and aggregates into its artefacts. Catches resume bugs (double-counting) and missing output. | ✅ scoped to a subset |
-| **MUVERA** `test_muvera_calibration` | The FDE prefetch beats a bag-of-tokens baseline and recovers ≥80% of the exact late-interaction top-10 at the deepest sweep depth. Without it, `muvera_late_interaction_rescore` would measure its own recall ceiling rather than reranking quality. | ✅ passes |
+| **MUVERA** `test_muvera_calibration` | The FDE prefetch beats a bag-of-tokens baseline and recovers ≥80% of the exact late-interaction top-10 at the deepest sweep depth. Without it, `muvera_late_interaction_rescore` would measure its own recall ceiling rather than reranking quality. | ❌ fails for LateOn at the current setting — see [Known limitations](#known-limitations) |
 
-**On Gate 1's published-vs-measured gap.** The gate passes with measured NDCG@10 =
-**0.3314** against the published **0.34305** (Δ0.0117), inside a deliberately widened
-0.02 tolerance. The gap has one identified cause: FastEmbed distributes this model only
-as a quantized ONNX build (`qdrant/bge-small-en-v1.5-onnx-q`, 66.5 MB against ~133 MB
-for full precision, with no fp32 variant offered), while the published figure was
-produced with the full-precision model. Document construction was ruled out as a cause —
-the loader already follows BEIR's `{title} {text}` convention. A −3.4% relative shortfall
-is what a quantized encoder predicts; a genuine qrels or ID-mapping fault would drop NDCG
-far more, which is what keeps the widened tolerance meaningful rather than vacuous.
+**On Gate 1 for `dense`.** The reference is the published **0.34305** NDCG@10 on
+NFCorpus from the model card, tolerance 0.02, measured over all 323 judged queries with
+the float32 model. The loader follows BEIR's `{title} {text}` document convention, which
+the published figure uses too. A genuine qrels or ID-mapping fault drops NDCG far more
+than 0.02, which keeps the tolerance meaningful.
 
 **On Gate 1 for `bm25`.** The reference is BM25 on NFCorpus from the BEIR paper
 (0.325, Elasticsearch), tolerance 0.02, measured through Qdrant's BM25 text index over
