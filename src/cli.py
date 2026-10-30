@@ -87,6 +87,10 @@ def run(
         Optional[str],
         typer.Option(help="Write raw records, aggregates, query samples and the manifest here instead of results/ (relative to the repo root). The embedding cache is shared."),
     ] = None,
+    cross_encoder_model: Annotated[
+        Optional[str],
+        typer.Option(help="Override the cross-encoder the *_cross_encoder arms rerank with. Either a FastEmbed model name, or HF_REPO:onnx/file.onnx to register one FastEmbed does not ship."),
+    ] = None,
     muvera_setting: Annotated[
         Optional[str],
         typer.Option(help="Override MUVERA's k_sim,d_proj,n_reps for this run, e.g. 4,16,40"),
@@ -103,11 +107,26 @@ def run(
         _echo(f"writing results under {cfg.paths['results']}")
     if depths:
         cfg = cfg.with_depths_override(_parse_depths(depths))
+    if cross_encoder_model:
+        from .config import RerankerOnnxSource
+
+        if ":" in cross_encoder_model:
+            hf, _, file = cross_encoder_model.partition(":")
+            update = {"name": hf, "onnx": RerankerOnnxSource(hf=hf, file=file)}
+        else:
+            update = {"name": cross_encoder_model, "onnx": None}
+        cross = cfg.models.cross_encoder.model_copy(update=update)
+        cfg = cfg.model_copy(
+            update={"models": cfg.models.model_copy(update={"cross_encoder": cross})}
+        )
+        _echo(f"cross-encoder overridden: {cross.model_id}")
+
     if muvera_setting or allow_uncalibrated_muvera:
         update: dict = {"allow_uncalibrated": allow_uncalibrated_muvera}
         if muvera_setting:
             k_sim, d_proj, n_reps = (int(part) for part in muvera_setting.split(","))
             update |= {"k_sim": k_sim, "d_proj": d_proj, "n_reps": n_reps}
+        update.setdefault("center", cfg.models.muvera.center)
         muvera = cfg.models.muvera.model_copy(update=update)
         cfg = cfg.model_copy(update={"models": cfg.models.model_copy(update={"muvera": muvera})})
         _echo(
@@ -267,6 +286,14 @@ def run(
         else:
             _echo("  memory read skipped")
 
+        muvera_calibration: dict | None = None
+        if any(arm.name == "muvera_late_interaction_rescore" for arm in resolved_arms):
+            from .arms import muvera_calibration_status
+
+            passed, reason = muvera_calibration_status(cfg, name)
+            muvera_calibration = {"passed": passed, "reason": reason}
+            _echo(f"  muvera calibration: {'PASS' if passed else 'FAIL'} — {reason}")
+
         summary = run_dataset(
             cfg, bundle, encoders, collection,
             include_arms=requested_arms, resume=resume, log=_echo,
@@ -295,6 +322,10 @@ def run(
                 "units": summary.units,
                 "collection_queried": collection,
                 "shard_number": 1,
+                # Recorded whether it passed or not: with require_calibration off the arm
+                # still runs, so the verdict is the only thing marking its FDE as
+                # under-performing on this dataset.
+                "muvera_calibration": muvera_calibration,
                 # Without the pinned revisions a later rerun can silently retrieve a
                 # different corpus, queries, or qrels from the same repo name.
                 "hf_corpus_revision": spec.hf_corpus_revision,
@@ -408,7 +439,7 @@ def tune_muvera(
     rows: list[dict] = []
     for dataset in grid.datasets:
         bundle = load_dataset_bundle(cfg, dataset)
-        doc_tokens, query_tokens = calibration_inputs(cfg, bundle, encoders)
+        doc_tokens, query_tokens, mean = calibration_inputs(cfg, bundle, encoders)
         multivector_bytes = float(np.mean([len(d) for d in doc_tokens])) * token_dim * 4
         depths = tuple(cfg.depths_for(dataset))
         _echo(
@@ -424,6 +455,7 @@ def tune_muvera(
                 query_tokens,
                 depths=depths,
                 truth_k=cfg.run.execution.final_limit,
+                mean=mean,
                 workers=cfg.run.ingestion.muvera_workers or None,
             )
             fde_bytes = setting.dim * 4
@@ -508,8 +540,11 @@ def calibrate_muvera(
     encoders = build_encoders(cfg)
     bundle = load_dataset_bundle(cfg, dataset)
 
-    doc_tokens, query_tokens = calibration_inputs(cfg, bundle, encoders)
-    _echo(f"{len(doc_tokens)} documents, {len(query_tokens)} held-out warmup queries")
+    doc_tokens, query_tokens, mean = calibration_inputs(cfg, bundle, encoders)
+    _echo(
+        f"{len(doc_tokens)} documents, {len(query_tokens)} held-out warmup queries"
+        f"{', mean-centered' if mean is not None else ''}"
+    )
 
     result = calibrate(
         cfg.models.muvera,
@@ -519,6 +554,7 @@ def calibrate_muvera(
         query_tokens,
         depths=tuple(cfg.depths_for(dataset)),
         truth_k=cfg.run.execution.final_limit,
+        mean=mean,
         workers=cfg.run.ingestion.muvera_workers or None,
     )
     payload = result.as_dict() | {

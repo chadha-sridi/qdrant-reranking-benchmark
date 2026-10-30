@@ -660,6 +660,13 @@ python -m src.cli memory --dataset nfcorpus
 Builds (or reuses) the dataset's collection, reads Qdrant's per-vector memory
 accounting off it, and prints the record as JSON.
 
+MUVERA encodes **mean-centered** tokens (`muvera.center`): late-interaction embeddings
+collapse into a narrow cone, and SimHash cannot partition a cone — nearly every random
+hyperplane falls to one side of it. The corpus mean is computed once, streamed over the
+ingestion chunks, cached, and recorded in the manifest; queries are centered on the same
+vector. Only the `muvera` vector is affected — the multivectors the rescoring stage reads
+are stored uncentered.
+
 ### `tune-muvera` — choose the FDE setting on held-out queries
 
 ```bash
@@ -773,8 +780,11 @@ than 0.02, which keeps the tolerance meaningful.
 (0.325, Elasticsearch), tolerance 0.02, measured through Qdrant's BM25 text index over
 all 323 judged queries.
 
-MUVERA is not yet calibrated for LateOn (see [Known limitations](#known-limitations)), so
-`muvera_late_interaction_rescore` is excluded until it is. The arm is gated per dataset —
+The FDE setting is chosen once by `tune-muvera` and applied to every dataset, so a
+dataset whose calibration falls short is reported rather than dropped from the
+comparison: `muvera.require_calibration: false` runs the arm anyway and records the
+verdict under `datasets.<name>.muvera_calibration` in the manifest. Set it true to gate
+per dataset instead —
 `resolve_arms` excludes it on any dataset without a passing calibration artifact or an
 explicit `muvera.calibrated: true` override, so it cannot silently run uncalibrated even
 if you add a new dataset later. Both count only for the late-interaction model they were

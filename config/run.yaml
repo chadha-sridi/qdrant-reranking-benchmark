@@ -71,9 +71,13 @@ qdrant:
     # whose m=0 means it has no graph to use in the first place.
     full_scan_threshold_kb: 10
   upsert_batch_size: 256
-  # Restored after the upload finishes, which is what triggers the HNSW build. Indexing
-  # is switched off during the upload itself. Qdrant's default is 20000 (KB).
-  indexing_threshold_kb: 20000
+  # Restored after the upload finishes, which is what triggers the HNSW build; indexing
+  # is switched off during the upload itself. Low rather than Qdrant's 20000 default for
+  # the same reason as full_scan_threshold_kb: a collection whose segments stay under the
+  # threshold is never indexed at all, and every search becomes a brute-force scan. That
+  # happens to any small collection, so the threshold has to sit below the smallest one
+  # a run can build.
+  indexing_threshold_kb: 10
 
 ingestion:
   # Documents embedded and upserted together before moving to the next chunk. At this

@@ -32,8 +32,47 @@ def _init_worker(cfg_dump: dict, token_dim: int, seed: int) -> None:
     _WORKER_MUVERA = build_muvera(MuveraModel(**cfg_dump), token_dim, seed)
 
 
-def _encode_slice(doc_tokens: list[np.ndarray]) -> np.ndarray:
-    return np.stack([_WORKER_MUVERA.process_document(d) for d in doc_tokens]).astype(np.float32)
+def _encode_slice(args: tuple[list[np.ndarray], np.ndarray | None]) -> np.ndarray:
+    doc_tokens, mean = args
+    return np.stack(
+        [_WORKER_MUVERA.process_document(center_tokens(d, mean)) for d in doc_tokens]
+    ).astype(np.float32)
+
+
+def center_tokens(tokens: np.ndarray, mean: np.ndarray | None) -> np.ndarray:
+    """Token vectors with the corpus mean removed, for FDE encoding only."""
+    tokens = np.asarray(tokens, dtype=np.float32)
+    if mean is None:
+        return tokens
+    return tokens - np.asarray(mean, dtype=np.float32)
+
+
+class TokenMean:
+    """Streaming mean of a corpus's late-interaction token vectors.
+
+    Accumulated in float64 over chunks so the result does not depend on how the corpus
+    was split, and so a corpus too large to hold at once still yields the exact mean.
+    """
+
+    def __init__(self, dim: int) -> None:
+        self._total = np.zeros(dim, dtype=np.float64)
+        self._count = 0
+
+    def update(self, doc_tokens: Sequence[np.ndarray]) -> None:
+        for doc in doc_tokens:
+            doc = np.asarray(doc, dtype=np.float64)
+            self._total += doc.sum(axis=0)
+            self._count += doc.shape[0]
+
+    def result(self) -> np.ndarray:
+        if self._count == 0:
+            raise ValueError("cannot take the mean of an empty corpus")
+        return (self._total / self._count).astype(np.float32)
+
+
+def encode_query(muvera, query_tokens: np.ndarray, mean: np.ndarray | None) -> np.ndarray:
+    """FDE-encode one query's tokens, centered to match the documents."""
+    return muvera.process_query(center_tokens(query_tokens, mean))
 
 
 def encode_documents(
@@ -42,6 +81,7 @@ def encode_documents(
     seed: int,
     doc_tokens: Sequence[np.ndarray],
     *,
+    mean: np.ndarray | None = None,
     workers: int | None = None,
 ) -> np.ndarray:
     """FDE-encode a corpus, split across worker processes.
@@ -58,9 +98,11 @@ def encode_documents(
         workers = min(os.cpu_count() or 1, max(1, len(doc_tokens) // 256))
     if workers <= 1:
         muvera = build_muvera(cfg, token_dim, seed)
-        return np.stack([muvera.process_document(d) for d in doc_tokens]).astype(np.float32)
+        return np.stack(
+            [muvera.process_document(center_tokens(d, mean)) for d in doc_tokens]
+        ).astype(np.float32)
     bounds = np.linspace(0, len(doc_tokens), workers + 1, dtype=int)
-    slices = [doc_tokens[a:b] for a, b in zip(bounds, bounds[1:]) if b > a]
+    slices = [(doc_tokens[a:b], mean) for a, b in zip(bounds, bounds[1:]) if b > a]
     with ProcessPoolExecutor(
         max_workers=len(slices), initializer=_init_worker,
         initargs=(cfg.model_dump(), token_dim, seed),
@@ -111,19 +153,21 @@ def matrices_digest(muvera, cfg: MuveraModel, token_dim: int) -> str:
     )
 
 
-def calibration_inputs(cfg, bundle, encoders) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Every document's late-interaction tokens and the held-out warmup queries' tokens.
+def calibration_inputs(
+    cfg, bundle, encoders
+) -> tuple[list[np.ndarray], list[np.ndarray], "np.ndarray | None"]:
+    """Document tokens, held-out warmup query tokens, and the MUVERA centering mean.
 
     Calibration and tuning use only warmup queries, which are never evaluated, so no
     reported number comes from a query the FDE was checked or tuned on.
     """
-    from .indexing import late_interaction_corpus
+    from .indexing import late_interaction_corpus, muvera_token_mean
 
     doc_tokens = late_interaction_corpus(cfg, bundle, encoders)
     query_tokens = [
         encoders.embed_query_late_interaction(bundle.all_queries[qid]) for qid in bundle.warmup_ids
     ]
-    return doc_tokens, query_tokens
+    return doc_tokens, query_tokens, muvera_token_mean(cfg, bundle, encoders)
 
 
 def chamfer_similarity(query_tokens: np.ndarray, doc_tokens: np.ndarray) -> float:
@@ -209,6 +253,7 @@ def calibrate(
     *,
     depths: Sequence[int] = (10, 50, 100, 200),
     truth_k: int = 10,
+    mean: np.ndarray | None = None,
     workers: int | None = None,
 ) -> CalibrationResult:
     """Measure how well the FDE recovers the exact max_sim top-k, against a bag baseline.
@@ -226,7 +271,9 @@ def calibrate(
     from scipy.stats import spearmanr
 
     muvera = build_muvera(muvera_cfg, token_dim, seed)
-    encoded_docs = encode_documents(muvera_cfg, token_dim, seed, doc_tokens, workers=workers)
+    encoded_docs = encode_documents(
+        muvera_cfg, token_dim, seed, doc_tokens, mean=mean, workers=workers
+    )
     bag_docs = np.stack([np.asarray(d, dtype=np.float32).sum(axis=0) for d in doc_tokens])
     blocks = chamfer_blocks(doc_tokens)
 
@@ -238,7 +285,7 @@ def calibrate(
         exact = exact_chamfer_scores(query, blocks)
         truth = set(np.argsort(-exact)[:truth_k].tolist())
 
-        approx = encoded_docs @ muvera.process_query(query)
+        approx = encoded_docs @ encode_query(muvera, query, mean)
         bag = bag_docs @ np.asarray(query, dtype=np.float32).sum(axis=0)
 
         for depth in depths:

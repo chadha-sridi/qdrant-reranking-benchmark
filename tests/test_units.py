@@ -127,6 +127,32 @@ def test_muvera_calibration_counts_only_for_the_model_it_was_calibrated_on(tmp_p
     assert not muvera_calibration_status(cfg, "nfcorpus")[0]
 
 
+def test_cross_encoder_onnx_source_gets_its_own_identity_and_registers_once():
+    """A custom reranker file must not be confused with a FastEmbed-shipped model of the
+    same name, in cache keys, digests, or the manifest."""
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+    from src.config import RerankerOnnxSource
+    from src.embedding import _register_onnx_reranker
+
+    cross = load_config().models.cross_encoder
+    assert cross.onnx is None and cross.model_id == cross.name
+
+    custom = cross.model_copy(
+        update={
+            "name": "Alibaba-NLP/gte-reranker-modernbert-base",
+            "onnx": RerankerOnnxSource(
+                hf="Alibaba-NLP/gte-reranker-modernbert-base", file="onnx/model.onnx"
+            ),
+        }
+    )
+    assert custom.model_id != custom.name
+    _register_onnx_reranker(custom)
+    _register_onnx_reranker(custom)
+    names = [entry["model"] for entry in TextCrossEncoder.list_supported_models()]
+    assert names.count(custom.model_id) == 1
+
+
 def test_dense_onnx_source_gets_its_own_identity_and_registers_once():
     """A custom file must never share a name, and so cached embeddings, with the build
     FastEmbed ships under the same model."""
@@ -181,6 +207,90 @@ def test_pointwise_scores_are_shared_within_a_query_and_costed_per_pair():
     off = SimpleNamespace(pointwise_scores=None, encoders=SimpleNamespace(cross=cross))
     assert _pointwise_scores(off, QueryTimers(), "q", ids[:2], texts[:2]) == scores_deep[:2]
     assert calls[2] == texts[:2]
+
+
+def test_token_mean_is_exact_and_independent_of_chunking():
+    """Ingestion streams the corpus in chunks; the centering vector must not depend on
+    where those boundaries fall."""
+    import numpy as np
+
+    from src.muvera import TokenMean
+
+    rng = np.random.default_rng(7)
+    docs = [rng.standard_normal((int(rng.integers(1, 12)), 6)) * 10 for _ in range(37)]
+    want = np.concatenate(docs, axis=0).mean(axis=0)
+
+    whole = TokenMean(6)
+    whole.update(docs)
+    np.testing.assert_allclose(whole.result(), want, rtol=1e-6)
+
+    chunked = TokenMean(6)
+    for start in range(0, len(docs), 5):
+        chunked.update(docs[start : start + 5])
+    np.testing.assert_allclose(chunked.result(), want, rtol=1e-6)
+
+    with pytest.raises(ValueError, match="empty corpus"):
+        TokenMean(6).result()
+
+
+def test_centering_applies_to_both_muvera_sides_and_changes_the_encoding():
+    """Documents and queries must be centered on the same vector, and an uncentered
+    encoding must never be mistaken for a centered one."""
+    import numpy as np
+
+    from src.muvera import build_muvera, center_tokens, encode_documents, encode_query
+
+    cfg = load_config().models.muvera.model_copy(update={"k_sim": 2, "d_proj": 4, "n_reps": 2})
+    rng = np.random.default_rng(3)
+    # Anisotropic on purpose: a shared dominant direction is what centering removes.
+    bias = np.ones(8, dtype=np.float32) * 5.0
+    docs = [(rng.standard_normal((6, 8)).astype(np.float32) + bias) for _ in range(12)]
+    query = rng.standard_normal((4, 8)).astype(np.float32) + bias
+    mean = np.concatenate(docs, axis=0).mean(axis=0)
+
+    plain = encode_documents(cfg, 8, 11, docs, workers=1)
+    centered = encode_documents(cfg, 8, 11, docs, mean=mean, workers=1)
+    assert not np.allclose(plain, centered)
+
+    muvera = build_muvera(cfg, 8, 11)
+    np.testing.assert_array_equal(
+        encode_query(muvera, query, mean), muvera.process_query(query - mean)
+    )
+    np.testing.assert_array_equal(encode_query(muvera, query, None), muvera.process_query(query))
+    np.testing.assert_array_equal(center_tokens(query, None), query)
+
+    # Parallel workers must centre identically to the serial path.
+    np.testing.assert_array_equal(
+        centered, encode_documents(cfg, 8, 11, docs, mean=mean, workers=3)
+    )
+
+
+def test_centred_and_uncentred_muvera_vectors_never_share_a_cache_entry(tmp_path):
+    """Centering changes every FDE, so a cache written without it must not be read back
+    with it."""
+    from src.embedding import EmbeddingCache, build_encoders
+    from src.indexing import muvera_cache_key
+
+    cfg = load_config()
+    assert cfg.models.muvera.center is True
+    off = cfg.model_copy(
+        update={
+            "models": cfg.models.model_copy(
+                update={"muvera": cfg.models.muvera.model_copy(update={"center": False})}
+            )
+        }
+    )
+    cache = EmbeddingCache(tmp_path)
+
+    def key(config, **kw):
+        return muvera_cache_key(
+            config, build_encoders(config), cache, "nfcorpus", "digest", **kw
+        )
+
+    assert key(cfg) != key(off)
+    assert key(cfg) != key(cfg, bounds=(0, 10))
+    assert key(cfg, bounds=(0, 10)) != key(cfg, bounds=(10, 20))
+    assert key(cfg, bounds=(0, 10)) == key(cfg, bounds=(0, 10))
 
 
 def test_muvera_parallel_encoding_matches_serial():
@@ -247,6 +357,34 @@ def test_late_interaction_config_rejects_nonzero_m():
         LateInteractionModel(
             name="x", dim=128, distance="cosine", hnsw_m=16, comparator="max_sim",
         )
+
+
+def test_failed_calibration_reports_rather_than_excludes_unless_required(tmp_path):
+    """With require_calibration off the arm still runs on a dataset whose FDE falls
+    short, and the verdict is what marks it; with it on, the arm is excluded."""
+    from src.arms import muvera_calibration_status, resolve_arms
+
+    cfg = load_config().with_results_dir(str(tmp_path))
+    assert cfg.models.muvera.require_calibration is False
+
+    passed, reason = muvera_calibration_status(cfg, "nfcorpus")
+    assert not passed and reason  # no artifact in this empty results dir
+    arms, exclusions = resolve_arms(cfg, "nfcorpus")
+    assert "muvera_late_interaction_rescore" in {a.name for a in arms}
+    assert "muvera_late_interaction_rescore" not in exclusions
+
+    required = cfg.model_copy(
+        update={
+            "models": cfg.models.model_copy(
+                update={
+                    "muvera": cfg.models.muvera.model_copy(update={"require_calibration": True})
+                }
+            )
+        }
+    )
+    arms, exclusions = resolve_arms(required, "nfcorpus")
+    assert "muvera_late_interaction_rescore" not in {a.name for a in arms}
+    assert "muvera_late_interaction_rescore" in exclusions
 
 
 def test_late_interaction_tokens_are_kept_to_the_model_own_window():
@@ -438,6 +576,15 @@ def test_resolve_arms_matches_the_default_set(tmp_path):
 
     cfg = load_config().with_results_dir(str(tmp_path))
     cfg = _with_muvera_calibrated_for(cfg, cfg.models.late_interaction.name)
+    cfg = cfg.model_copy(
+        update={
+            "models": cfg.models.model_copy(
+                update={
+                    "muvera": cfg.models.muvera.model_copy(update={"require_calibration": True})
+                }
+            )
+        }
+    )
     arms, exclusions = resolve_arms(cfg, "nfcorpus")
     assert not exclusions, f"unexpected exclusions: {exclusions}"
     assert {a.name for a in arms} == set(cfg.run.arms.enabled)
@@ -578,32 +725,58 @@ def test_verify_ingestion_rejects_a_short_collection():
 
 
 def test_verify_ingestion_rejects_an_unindexed_collection():
-    """indexing_threshold=0 reports green with no HNSW built: brute-force latency."""
+    """A collection can report green with no HNSW built — because indexing was disabled,
+    or because its segments never reached the threshold. Either way every search is a
+    brute-force scan and the latency numbers are not ANN numbers."""
     from qdrant_client import models
 
     from src.indexing import IngestionError, verify_ingestion
 
-    class UnindexedClient:
-        def count(self, collection_name, exact):
-            return type("C", (), {"count": 10})()
-
-        def get_collection(self, name):
-            return type(
-                "I",
-                (),
-                {
-                    "status": models.CollectionStatus.GREEN,
-                    "config": type(
-                        "Cfg", (), {"optimizer_config": type("O", (), {"indexing_threshold": 0})()}
-                    )(),
-                },
-            )()
+    def client(threshold, indexed, m=16):
+        params = models.VectorParams(
+            size=4, distance=models.Distance.COSINE, hnsw_config=models.HnswConfigDiff(m=m)
+        )
+        info = type(
+            "I",
+            (),
+            {
+                "status": models.CollectionStatus.GREEN,
+                "indexed_vectors_count": indexed,
+                "config": type(
+                    "Cfg",
+                    (),
+                    {
+                        "optimizer_config": type(
+                            "O", (), {"indexing_threshold": threshold}
+                        )(),
+                        "params": type("P", (), {"vectors": {"dense": params}})(),
+                    },
+                )(),
+            },
+        )()
+        return type(
+            "C",
+            (),
+            {
+                "count": lambda self, collection_name, exact: type("N", (), {"count": 10})(),
+                "get_collection": lambda self, name: info,
+            },
+        )()
 
     with pytest.raises(IngestionError, match="indexing_threshold is 0"):
-        verify_ingestion(UnindexedClient(), "c", expected_points=10)
+        verify_ingestion(client(0, 0), "c", expected_points=10)
 
-    # Tolerated where there are no vectors to index (the payload-only baseline).
-    verify_ingestion(UnindexedClient(), "c", expected_points=10, require_indexed=False)
+    # Threshold never reached: green, non-zero threshold, nothing indexed.
+    with pytest.raises(IngestionError, match="brute-force"):
+        verify_ingestion(client(20000, 0), "c", expected_points=10)
+
+    verify_ingestion(client(10, 10), "c", expected_points=10)
+
+    # A multivector-only collection asks for no graph (m=0), so nothing to index.
+    verify_ingestion(client(10, 0, m=0), "c", expected_points=10)
+
+    # Tolerated where the caller says so (the payload-only baseline).
+    verify_ingestion(client(0, 0), "c", expected_points=10, require_indexed=False)
 
 
 def test_ingestion_resume_targets_only_the_missing_points():

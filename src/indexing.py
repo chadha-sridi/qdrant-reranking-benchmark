@@ -95,17 +95,7 @@ def embed_corpus(
             out.late_interaction = cached_late_interaction
 
     if "muvera" in representations:
-        muvera = encoders.muvera
-        from .muvera import matrices_digest as _muvera_digest
-
-        digest_str = _muvera_digest(muvera, cfg.models.muvera, cfg.models.late_interaction.dim)
-        key = cache.key(
-            representation="muvera",
-            model_name=f"fde({cfg.models.late_interaction.name})",
-            dataset=name,
-            corpus_digest=digest,
-            extra={"matrices": digest_str, "truncation": TRUNCATION},
-        )
+        key = muvera_cache_key(cfg, encoders, cache, name, digest)
         cached_muvera = cache.load_dense(key)
         if cached_muvera is None:
             source = cached_late_interaction if needs_late_interaction else None
@@ -116,13 +106,14 @@ def embed_corpus(
 
             cached_muvera = encode_documents(
                 cfg.models.muvera, cfg.models.late_interaction.dim, cfg.run.seeds.muvera,
-                source, workers=cfg.run.ingestion.muvera_workers or None,
+                source, mean=muvera_token_mean(cfg, bundle, encoders, cache),
+                workers=cfg.run.ingestion.muvera_workers or None,
             )
             out.timings["muvera"] = time.perf_counter() - start
             cache.save_dense(
                 key,
                 cached_muvera,
-                {"model": "muvera_fde", "dataset": name, "matrices": digest_str},
+                {"model": "muvera_fde", "dataset": name, "key": key},
             )
         out.muvera = cached_muvera
 
@@ -165,6 +156,40 @@ def late_interaction_cache_key(
         dataset=bundle.spec.name,
         corpus_digest=bundle.corpus_digest,
         extra={"truncation": TRUNCATION},
+    )
+
+
+def muvera_cache_key(
+    cfg: Config,
+    encoders: Encoders,
+    cache: EmbeddingCache,
+    dataset: str,
+    corpus_digest: str,
+    *,
+    bounds: tuple[int, int] | None = None,
+) -> str:
+    """Cache key for FDE-encoded documents.
+
+    Every input that changes the vectors is in it: the source model, the FDE's own
+    random matrices, the truncation, and whether the tokens were mean-centered.
+    """
+    from .muvera import matrices_digest
+
+    extra: dict = {
+        "matrices": matrices_digest(
+            encoders.muvera, cfg.models.muvera, cfg.models.late_interaction.dim
+        ),
+        "truncation": TRUNCATION,
+        "center": cfg.models.muvera.center,
+    }
+    if bounds is not None:
+        extra["chunk_start"], extra["chunk_end"] = bounds
+    return cache.key(
+        representation="muvera",
+        model_name=f"fde({cfg.models.late_interaction.name})",
+        dataset=dataset,
+        corpus_digest=corpus_digest,
+        extra=extra,
     )
 
 
@@ -473,14 +498,30 @@ def verify_ingestion(
     if info.status != models.CollectionStatus.GREEN:
         raise IngestionError(f"{name}: status {info.status}, expected green after indexing")
 
-    # A collection frozen at indexing_threshold=0 reports green with nothing indexed, so
-    # a green status alone is not evidence that an index exists.
+    if not require_indexed:
+        return
+
+    # Green status is not evidence that an index exists: a collection frozen at
+    # indexing_threshold=0, or one whose segments never reached the threshold, reports
+    # green with nothing indexed. Only the count of indexed vectors settles it.
     threshold = getattr(info.config.optimizer_config, "indexing_threshold", None)
-    if require_indexed and threshold == 0:
+    if threshold == 0:
         raise IngestionError(
             f"{name}: indexing_threshold is 0, so the HNSW index was never built and "
             "every search would be a brute-force scan. Latency numbers would be "
             "meaningless."
+        )
+    wants_graph = [
+        vector_name
+        for vector_name, params in (info.config.params.vectors or {}).items()
+        if (params.hnsw_config.m if params.hnsw_config else None) != 0
+    ]
+    if wants_graph and not info.indexed_vectors_count:
+        raise IngestionError(
+            f"{name}: {info.indexed_vectors_count} vectors indexed although "
+            f"{', '.join(wants_graph)} ask for an HNSW graph, so every search is a "
+            f"brute-force scan. The collection's segments did not reach "
+            f"indexing_threshold ({threshold} KB); lower qdrant.indexing_threshold_kb."
         )
 
 
@@ -531,6 +572,7 @@ def _embed_chunk(
     *,
     chunk_start: int,
     chunk_end: int,
+    muvera_mean: np.ndarray | None = None,
 ) -> DocumentVectors:
     """Embed one slice of the corpus, reusing the on-disk cache per representation.
 
@@ -576,21 +618,8 @@ def _embed_chunk(
             out.late_interaction = cached_late_interaction
 
     if "muvera" in representations:
-        muvera = encoders.muvera
-        from .muvera import matrices_digest as _muvera_digest
-
-        digest_str = _muvera_digest(muvera, cfg.models.muvera, cfg.models.late_interaction.dim)
-        key = cache.key(
-            representation="muvera",
-            model_name=f"fde({cfg.models.late_interaction.name})",
-            dataset=name,
-            corpus_digest=digest,
-            extra={
-                "matrices": digest_str,
-                "truncation": TRUNCATION,
-                "chunk_start": chunk_start,
-                "chunk_end": chunk_end,
-            },
+        key = muvera_cache_key(
+            cfg, encoders, cache, name, digest, bounds=(chunk_start, chunk_end)
         )
         cached_muvera = cache.load_dense(key)
         if cached_muvera is None:
@@ -600,16 +629,61 @@ def _embed_chunk(
 
             cached_muvera = encode_documents(
                 cfg.models.muvera, cfg.models.late_interaction.dim, cfg.run.seeds.muvera,
-                cached_late_interaction, workers=cfg.run.ingestion.muvera_workers or None,
+                cached_late_interaction, mean=muvera_mean,
+                workers=cfg.run.ingestion.muvera_workers or None,
             )
             cache.save_dense(
                 key,
                 cached_muvera,
-                {"model": "muvera_fde", "dataset": name, "matrices": digest_str},
+                {"model": "muvera_fde", "dataset": name, "key": key},
             )
         out.muvera = cached_muvera
 
     return out
+
+
+def muvera_token_mean(
+    cfg: Config, bundle: LoadedDataset, encoders: Encoders, cache: EmbeddingCache | None = None
+) -> np.ndarray | None:
+    """The corpus mean token vector MUVERA centers on, or None when centering is off.
+
+    Streamed over the same chunks ingestion uses, so a corpus that does not fit in
+    memory still yields the exact mean, and cached: the query side needs the identical
+    vector, and recomputing it would mean re-reading every token of the corpus.
+    """
+    if not cfg.models.muvera.center:
+        return None
+    from .muvera import TokenMean
+
+    cache = cache or EmbeddingCache(cfg.paths["cache"])
+    key = cache.key(
+        representation="muvera_mean",
+        model_name=cfg.models.late_interaction.name,
+        dataset=bundle.spec.name,
+        corpus_digest=bundle.corpus_digest,
+        extra={"truncation": TRUNCATION},
+    )
+    cached = cache.load_dense(key)
+    if cached is not None:
+        return cached[0]
+
+    mean = TokenMean(cfg.models.late_interaction.dim)
+    for chunk_start, chunk_end in _chunk_bounds(
+        len(bundle.documents), cfg.run.ingestion.chunk_size
+    ):
+        chunk = _embed_chunk(
+            cfg, bundle, encoders, ["late_interaction"], cache,
+            chunk_start=chunk_start, chunk_end=chunk_end,
+        )
+        mean.update(chunk.require("late_interaction"))
+    result = mean.result()
+    cache.save_dense(
+        key,
+        result[None, :],
+        {"model": cfg.models.late_interaction.name, "dataset": bundle.spec.name,
+         "kind": "muvera_token_mean"},
+    )
+    return result
 
 
 def late_interaction_corpus(
@@ -656,6 +730,11 @@ def ingest_corpus(
     cache = cache or EmbeddingCache(cfg.paths["cache"])
     total = len(bundle.documents)
     chunk_size = cfg.run.ingestion.chunk_size
+    # Once, before any chunk is encoded: centering needs the whole corpus's mean, so it
+    # cannot be derived chunk by chunk.
+    muvera_mean = (
+        muvera_token_mean(cfg, bundle, encoders, cache) if "muvera" in representations else None
+    )
 
     start = time.perf_counter()
     _disable_indexing(client, name)
@@ -668,7 +747,7 @@ def ingest_corpus(
 
         chunk_vectors = _embed_chunk(
             cfg, bundle, encoders, representations, cache,
-            chunk_start=chunk_start, chunk_end=chunk_end,
+            chunk_start=chunk_start, chunk_end=chunk_end, muvera_mean=muvera_mean,
         )
         batch_size = safe_batch_size(cfg, chunk_vectors, representations, chunk_end - chunk_start)
         for batch in iter_batches(missing, batch_size):

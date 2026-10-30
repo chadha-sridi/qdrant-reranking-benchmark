@@ -86,7 +86,7 @@ def plan_digest(cfg: Config, bundle: LoadedDataset, units: Sequence[Unit]) -> st
                 "dense": cfg.models.dense.model_id,
                 "bm25": cfg.models.bm25.model_dump(exclude={"reference"}),
                 "late_interaction": cfg.models.late_interaction.name,
-                "cross_encoder": cfg.models.cross_encoder.name,
+                "cross_encoder": cfg.models.cross_encoder.model_id,
                 "muvera": cfg.models.muvera.model_dump(),
             },
             "qdrant_image": cfg.run.qdrant.image,
@@ -167,6 +167,13 @@ def run_dataset(
 
     client = build_client(cfg, for_queries=True)
     try:
+        # The collection's MUVERA vectors were centered on this corpus's mean, so the
+        # query side must use the identical vector. Cached by the build that wrote them.
+        muvera_mean = None
+        if any("muvera" in arm.requires for arm in arms):
+            from .indexing import muvera_token_mean
+
+            muvera_mean = muvera_token_mean(cfg, bundle, encoders)
         ctx = ArmContext(
             client=client,
             cfg=cfg,
@@ -174,6 +181,7 @@ def run_dataset(
             id_map=bundle.id_map,
             collection=collection,
             dataset=dataset,
+            muvera_mean=muvera_mean,
         )
 
         if resume:

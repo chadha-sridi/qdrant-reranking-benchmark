@@ -247,6 +247,13 @@ class MuveraModel(_Frozen):
     """
 
     source_tokens: str
+    # Subtract the corpus mean token vector before FDE encoding, on both sides.
+    # Late-interaction token embeddings are anisotropic -- they collapse into a narrow
+    # cone -- and SimHash partitions a cone poorly, since almost every random hyperplane
+    # falls to one side of it. Centering moves the cloud onto the origin, where the
+    # partitions actually separate documents. Affects the `muvera` vector only: the
+    # stored multivectors the rescoring stage reads are never centered.
+    center: bool = True
     k_sim: int
     n_reps: int
     d_proj: int
@@ -261,6 +268,11 @@ class MuveraModel(_Frozen):
     # Fraction of the exact max_sim top-k the FDE prefetch must recover at a dataset's
     # deepest candidate depth. A project convention, not a published standard.
     min_recall: float = 0.8
+    # False runs muvera_late_interaction_rescore wherever its calibration fails, instead
+    # of excluding the arm, and records the verdict per dataset in the manifest. The FDE
+    # setting is chosen once on the tuning datasets, so a per-dataset failure is a result
+    # to report, not a reason to leave a gap in the comparison.
+    require_calibration: bool = True
     tuning_grid: MuveraTuningGrid | None = None
     # Set only by `run --allow-uncalibrated-muvera`, for measuring the arm end to end
     # before a setting is chosen. Recorded in the manifest with the rest of this block.
@@ -275,10 +287,34 @@ class MuveraModel(_Frozen):
         return self.n_reps * self.n_partitions * self.d_proj
 
 
+class RerankerOnnxSource(_Frozen):
+    """An ONNX cross-encoder FastEmbed does not ship, registered as a custom model.
+
+    The file must emit a single score per (query, document) pair; a backbone-only export
+    that emits hidden states cannot be scored and is rejected when the model loads.
+    """
+
+    hf: str
+    file: str
+
+
 class CrossEncoderModel(_Frozen):
     name: str
     size_gb: float
     license: str
+    onnx: RerankerOnnxSource | None = None
+
+    @property
+    def model_id(self) -> str:
+        """The model's FastEmbed name, and its identity in digests and manifests.
+
+        A custom ONNX source gets its own name: FastEmbed refuses to register a second
+        file under a model it already ships, and two files must never be confused in a
+        recorded result.
+        """
+        if self.onnx is None:
+            return self.name
+        return f"{self.name} ({self.onnx.hf}:{self.onnx.file})"
 
 
 class ModelsConfig(_Frozen):

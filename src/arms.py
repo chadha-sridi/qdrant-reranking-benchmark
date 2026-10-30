@@ -34,6 +34,7 @@ from qdrant_client.conversions.conversion import GrpcToRest, RestToGrpc
 from .config import Config
 from .datasets import IdMap
 from .embedding import Encoders
+from .muvera import encode_query
 from .timing import QueryTimers
 
 Retrieved = list[tuple[str, float]]
@@ -55,6 +56,10 @@ class ArmContext:
     # The runner resets it for every query; None disables sharing (see
     # execution.share_pointwise_scores).
     pointwise_scores: dict[str, tuple[float, float]] | None = None
+    # The corpus mean token vector the collection's MUVERA vectors were centered on.
+    # Queries must be centered on the same vector or the two sides no longer share a
+    # coordinate system. None when muvera.center is off.
+    muvera_mean: "np.ndarray | None" = None
 
 
 @dataclass
@@ -367,7 +372,9 @@ def muvera_late_interaction_rescore_arm(ctx: ArmContext, query: str, depth: int 
         late_interaction_tokens = ctx.encoders.embed_query_late_interaction(query)
         late_interaction_tokens_list = late_interaction_tokens.tolist()
     with timers.embed("muvera"):
-        muvera_vec_list = ctx.encoders.muvera.process_query(late_interaction_tokens).tolist()
+        muvera_vec_list = encode_query(
+            ctx.encoders.muvera, late_interaction_tokens, ctx.muvera_mean
+        ).tolist()
     retrieved = run_query(
         ctx,
         timers,
@@ -474,7 +481,7 @@ def bm25_cross_encoder_arm(ctx: ArmContext, query: str, depth: int | None) -> Ar
 
 
 def muvera_calibration_status(cfg: Config, dataset: str) -> tuple[bool, str]:
-    """Is `muvera_late_interaction_rescore` allowed to run on this dataset?
+    """Did `muvera_late_interaction_rescore`'s FDE pass calibration on this dataset?
 
     `muvera.calibrated: true` in config is a manual override for someone who has
     verified the model themselves; absent that, a passing calibration artifact for
@@ -533,7 +540,9 @@ def muvera_calibration_status(cfg: Config, dataset: str) -> tuple[bool, str]:
     return True, f"{path}: recall@{deepest}={recall:.2f}, beats bag-of-tokens"
 
 
-def resolve_arms(cfg: Config, dataset: str, *, include: Sequence[str] | None = None) -> tuple[list[ArmSpec], dict[str, str]]:
+def resolve_arms(
+    cfg: Config, dataset: str, *, include: Sequence[str] | None = None
+) -> tuple[list[ArmSpec], dict[str, str]]:
     """Return (runnable arms, exclusions) for a dataset.
 
     Exclusions are returned, not swallowed: reporting which
@@ -560,7 +569,7 @@ def resolve_arms(cfg: Config, dataset: str, *, include: Sequence[str] | None = N
             continue
         if name == "muvera_late_interaction_rescore":
             ok, reason = muvera_calibration_status(cfg, dataset)
-            if not ok:
+            if not ok and cfg.models.muvera.require_calibration:
                 exclusions[name] = reason
                 continue
         arms.append(arm)

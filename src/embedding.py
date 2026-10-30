@@ -15,7 +15,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 
-from .config import Config, DenseModel, ModelsConfig
+from .config import Config, CrossEncoderModel, DenseModel, ModelsConfig
 from .muvera import build_muvera
 from .platform_info import assert_same_platform, current_platform, file_digest, stable_digest
 
@@ -60,7 +60,10 @@ class Encoders:
         if self._cross is None:
             from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-            self._cross = TextCrossEncoder(model_name=self.models.cross_encoder.name)
+            cross = self.models.cross_encoder
+            if cross.onnx is not None:
+                _register_onnx_reranker(cross)
+            self._cross = TextCrossEncoder(model_name=cross.model_id)
         return self._cross
 
     @property
@@ -104,6 +107,22 @@ class Encoders:
                 except OSError:
                     continue
         return digests
+
+
+def _register_onnx_reranker(cross: CrossEncoderModel) -> None:
+    from fastembed.common.model_description import ModelSource
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+    if any(
+        entry["model"] == cross.model_id for entry in TextCrossEncoder.list_supported_models()
+    ):
+        return
+    TextCrossEncoder.add_custom_model(
+        model=cross.model_id,
+        sources=ModelSource(hf=cross.onnx.hf),
+        model_file=cross.onnx.file,
+        size_in_gb=cross.size_gb,
+    )
 
 
 def _register_onnx_source(dense: DenseModel) -> None:

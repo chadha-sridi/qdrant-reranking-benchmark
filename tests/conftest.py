@@ -66,7 +66,7 @@ def nfcorpus_collection(cfg, nfcorpus, encoders, controller):
 @pytest.fixture
 def arm_context(cfg, nfcorpus, encoders, nfcorpus_collection):
     from src.arms import ArmContext
-    from src.indexing import build_client
+    from src.indexing import build_client, muvera_token_mean
 
     client = build_client(cfg, for_queries=True)
     ctx = ArmContext(
@@ -76,6 +76,7 @@ def arm_context(cfg, nfcorpus, encoders, nfcorpus_collection):
         id_map=nfcorpus.id_map,
         collection=nfcorpus_collection,
         dataset="nfcorpus",
+        muvera_mean=muvera_token_mean(cfg, nfcorpus, encoders),
     )
     yield ctx
     client.close()
