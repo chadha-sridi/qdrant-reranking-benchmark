@@ -32,7 +32,10 @@ def test_gate2_arms_return_different_results(cfg, nfcorpus, arm_context):
 
     results: dict[str, list[tuple[str, ...]]] = {}
     for arm in arms:
-        depth = cfg.depths_for("nfcorpus")[-1] if arm.sweeps_depth else None
+        # The arm's own deepest depth, not the dataset's: a capped arm must be probed at
+        # a depth the plan actually runs it at, and probing a cross-encoder arm at 1000
+        # would cost ~20x the whole gate.
+        depth = cfg.depths_for_arm("nfcorpus", arm.name)[-1] if arm.sweeps_depth else None
         results[arm.name] = [
             _top_ids(arm(arm_context, nfcorpus.queries[qid], depth)) for qid in query_ids
         ]

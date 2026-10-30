@@ -530,14 +530,20 @@ def muvera_calibration_status(cfg: Config, dataset: str) -> tuple[bool, str]:
     recall_at = payload.get("recall_at") or {}
     if not recall_at:
         return False, f"not calibrated: {path} has no recall_at data"
-    deepest = max(int(k) for k in recall_at)
-    recall = recall_at[str(deepest)]
+    at = muvera.calibration_depth
+    if str(at) not in recall_at:
+        measured = ", ".join(sorted(recall_at, key=int))
+        return False, (
+            f"not calibrated: {path} has no recall at depth {at} "
+            f"(muvera.calibration_depth); it measured {measured}"
+        )
+    recall = recall_at[str(at)]
     if recall < muvera.min_recall:
         return False, (
-            f"not calibrated: {path} shows recall@{deepest}={recall:.2f}, below the "
+            f"not calibrated: {path} shows recall@{at}={recall:.2f}, below the "
             f"{muvera.min_recall:.2f} threshold"
         )
-    return True, f"{path}: recall@{deepest}={recall:.2f}, beats bag-of-tokens"
+    return True, f"{path}: recall@{at}={recall:.2f}, beats bag-of-tokens"
 
 
 def resolve_arms(

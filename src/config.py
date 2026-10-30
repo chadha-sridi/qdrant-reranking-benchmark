@@ -278,9 +278,14 @@ class MuveraModel(_Frozen):
     # model.
     calibrated_model: str | None = None
     calibration_note: str | None = None
-    # Fraction of the exact max_sim top-k the FDE prefetch must recover at a dataset's
-    # deepest candidate depth. A project convention, not a published standard.
+    # Fraction of the exact max_sim top-k the FDE prefetch must recover at
+    # `calibration_depth`. A project convention, not a published standard.
     min_recall: float = 0.8
+    # The candidate depth min_recall is read at. Fixed rather than "the deepest depth
+    # swept", so the bar stays where the FDE setting was selected: extending the depth
+    # ladder must not move the threshold a recorded pass/fail verdict was measured
+    # against. Must be a depth the calibration artifact actually contains.
+    calibration_depth: int = 500
     # False runs muvera_late_interaction_rescore wherever its calibration fails, instead
     # of excluding the arm, and records the verdict per dataset in the manifest. The FDE
     # setting is chosen once on the tuning datasets, so a per-dataset failure is a result

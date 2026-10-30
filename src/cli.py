@@ -247,7 +247,9 @@ def run(
         # pay neither its encoding nor its 10,240-dim HNSW build. The official run
         # requests every arm, so it still builds everything.
         from .arms import required_representations, resolve_arms
+        from .runner import validate_arm_depth_caps
 
+        validate_arm_depth_caps(cfg)
         resolved_arms, excluded = resolve_arms(cfg, name, include=requested_arms)
         if not resolved_arms:
             raise RuntimeError(f"{name}: no runnable arms; exclusions={excluded}")
@@ -412,8 +414,8 @@ def tune_muvera(
     Each setting is scored by how much of the exact max_sim top-k its FDE recovers at
     every candidate depth, and its stored size per document is compared with the
     late-interaction multivectors it prefetches for. The selected setting is the
-    smallest FDE that reaches muvera.min_recall at the deepest depth on every tuning
-    dataset. Evaluated queries are never used.
+    smallest FDE that reaches muvera.min_recall at muvera.calibration_depth on every
+    tuning dataset. Evaluated queries are never used.
     """
     from itertools import product
 
@@ -441,7 +443,7 @@ def tune_muvera(
         bundle = load_dataset_bundle(cfg, dataset)
         doc_tokens, query_tokens, mean = calibration_inputs(cfg, bundle, encoders)
         multivector_bytes = float(np.mean([len(d) for d in doc_tokens])) * token_dim * 4
-        depths = tuple(cfg.depths_for(dataset))
+        depths = tuple(sorted({*cfg.depths_for(dataset), cfg.models.muvera.calibration_depth}))
         _echo(
             f"\n{dataset}: {len(doc_tokens)} documents, {len(query_tokens)} held-out warmup "
             f"queries; multivectors {multivector_bytes / 1024:.0f} KB per document"
@@ -469,9 +471,9 @@ def tune_muvera(
                     "fde_bytes_per_doc": fde_bytes,
                     "multivector_bytes_per_doc": multivector_bytes,
                     "larger_than_multivectors": fde_bytes > multivector_bytes,
-                    "recall_at_deepest": result.recall_at[max(depths)],
+                    "recall_at_calibration_depth": result.recall_at[muvera_cfg.calibration_depth],
                     "passes": result.beats_bag_of_tokens
-                    and result.recall_at[max(depths)] >= muvera_cfg.min_recall,
+                    and result.recall_at[muvera_cfg.calibration_depth] >= muvera_cfg.min_recall,
                     **result.as_dict(),
                 }
             )
@@ -497,8 +499,9 @@ def tune_muvera(
         "late_interaction_model": cfg.models.late_interaction.name,
         "grid": grid.model_dump(),
         "min_recall": muvera_cfg.min_recall,
-        "rule": "smallest FDE whose recall@deepest-depth reaches min_recall and beats "
-        "bag-of-tokens on every tuning dataset, on held-out warmup queries",
+        "calibration_depth": muvera_cfg.calibration_depth,
+        "rule": f"smallest FDE whose recall@{muvera_cfg.calibration_depth} reaches min_recall "
+        "and beats bag-of-tokens on every tuning dataset, on held-out warmup queries",
         "selected": None
         if selected is None
         else {"k_sim": selected.k_sim, "d_proj": selected.d_proj, "n_reps": selected.n_reps, "dim": selected.dim},
@@ -552,7 +555,7 @@ def calibrate_muvera(
         cfg.run.seeds.muvera,
         doc_tokens,
         query_tokens,
-        depths=tuple(cfg.depths_for(dataset)),
+        depths=tuple(sorted({*cfg.depths_for(dataset), cfg.models.muvera.calibration_depth})),
         truth_k=cfg.run.execution.final_limit,
         mean=mean,
         workers=cfg.run.ingestion.muvera_workers or None,

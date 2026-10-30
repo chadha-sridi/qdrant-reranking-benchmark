@@ -1253,6 +1253,11 @@ target recall (arXiv 2405.19504). Its Table 1 on MS MARCO needs 60 candidates to
   applied everywhere, so a dataset whose recall falls short is a result to publish, not a
   gap to leave in the comparison. The pass/fail verdict and its reason are recorded per
   dataset in the manifest, and printed at run time.
+- **The bar is read at a declared depth, `muvera.calibration_depth: 500`**, not at
+  whichever depth happens to be deepest. 500 is where the setting was selected, and
+  pinning it means extending the depth ladder (O12) cannot move the threshold that a
+  recorded verdict was measured against. `tune-muvera`, `calibrate-muvera` and the
+  run-time check all read the same rung, and each writes it into its artifact.
 
 ### O12 `[D]` One depth ladder for all arms, with a per-arm ceiling
 

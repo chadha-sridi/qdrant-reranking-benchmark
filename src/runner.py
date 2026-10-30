@@ -51,6 +51,27 @@ class RunSummary:
     wall_seconds: float
 
 
+def validate_arm_depth_caps(cfg: Config) -> None:
+    """Reject a cap that names an arm that does not exist or does not sweep depth.
+
+    Called before indexing as well as from `build_plan`, so a typo costs a second
+    rather than a full collection build.
+    """
+    caps = cfg.run.execution.arm_depth_caps
+    unknown = sorted(set(caps) - set(REGISTRY))
+    if unknown:
+        raise ValueError(
+            f"arm_depth_caps names unknown arm(s): {', '.join(unknown)}. "
+            f"Known arms: {', '.join(sorted(REGISTRY))}"
+        )
+    constant = sorted(name for name in caps if not REGISTRY[name].sweeps_depth)
+    if constant:
+        raise ValueError(
+            f"arm_depth_caps caps arm(s) that do not sweep depth: {', '.join(constant)}. "
+            "A baseline runs once with no depth, so a cap on it would do nothing."
+        )
+
+
 def build_plan(cfg: Config, arms: Sequence[ArmSpec], dataset: str | None = None) -> list[Unit]:
     """All (arm, depth) units, shuffled with a fixed seed.
 
@@ -59,13 +80,7 @@ def build_plan(cfg: Config, arms: Sequence[ArmSpec], dataset: str | None = None)
     actually has per query. An arm named in `execution.arm_depth_caps` runs that same
     ladder truncated at its cap.
     """
-    unknown = sorted(set(cfg.run.execution.arm_depth_caps) - set(REGISTRY))
-    if unknown:
-        raise ValueError(
-            f"arm_depth_caps names unknown arm(s): {', '.join(unknown)}. "
-            f"Known arms: {', '.join(sorted(REGISTRY))}"
-        )
-
+    validate_arm_depth_caps(cfg)
     units: list[Unit] = []
     for arm in arms:
         if not arm.sweeps_depth:

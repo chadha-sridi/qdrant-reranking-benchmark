@@ -113,7 +113,11 @@ def test_muvera_calibration_counts_only_for_the_model_it_was_calibrated_on(tmp_p
     artifact.parent.mkdir(parents=True)
     muvera = cfg.models.muvera
     settings = {"k_sim": muvera.k_sim, "n_reps": muvera.n_reps, "d_proj": muvera.d_proj}
-    passing = {"beats_bag_of_tokens": True, "recall_at": {"100": 0.9}, "config": settings}
+    passing = {
+        "beats_bag_of_tokens": True,
+        "recall_at": {str(muvera.calibration_depth): 0.9},
+        "config": settings,
+    }
     artifact.write_text(json.dumps(passing | {"late_interaction_model": "some/other-model"}))
     ok, reason = muvera_calibration_status(cfg, "nfcorpus")
     assert not ok and "some/other-model" in reason
@@ -665,14 +669,54 @@ def test_build_plan_capped_arm_gets_fewer_units_than_an_uncapped_one():
     assert by_arm["dense"] == [None]
 
 
+def _with_caps(cfg, caps: dict[str, int]):
+    execution = cfg.run.execution.model_copy(update={"arm_depth_caps": caps})
+    return cfg.model_copy(update={"run": cfg.run.model_copy(update={"execution": execution})})
+
+
 def test_build_plan_rejects_a_cap_on_an_unknown_arm():
     """A typo in arm_depth_caps must fail loudly, not silently cap nothing."""
-    cfg = load_config()
-    execution = cfg.run.execution.model_copy(update={"arm_depth_caps": {"cross_encodr": 50}})
-    broken = cfg.model_copy(update={"run": cfg.run.model_copy(update={"execution": execution})})
+    broken = _with_caps(load_config(), {"cross_encodr": 50})
     arms, _ = resolve_arms(broken, "scifact")
     with pytest.raises(ValueError, match="unknown arm"):
         build_plan(broken, arms, "scifact")
+
+
+def test_build_plan_rejects_a_cap_on_a_baseline():
+    """A baseline runs once with no depth, so a cap on it silently does nothing."""
+    broken = _with_caps(load_config(), {"dense": 50})
+    arms, _ = resolve_arms(broken, "scifact")
+    with pytest.raises(ValueError, match="do not sweep depth"):
+        build_plan(broken, arms, "scifact")
+
+
+def test_calibration_bar_is_read_at_the_declared_depth_not_the_deepest():
+    """Extending the depth ladder must not move the threshold a verdict was measured at."""
+    import json
+
+    from src.arms import muvera_calibration_status
+
+    cfg = load_config()
+    at = cfg.models.muvera.calibration_depth
+    assert at in cfg.depths_for("nfcorpus"), "calibration_depth must be a depth the sweep measures"
+    assert at < max(cfg.depths_for("nfcorpus")), "test is vacuous unless the ladder runs deeper"
+
+    path = cfg.paths["agg"] / "nfcorpus__muvera_calibration.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Comfortably passing at the deepest depth, failing at the declared one.
+    path.write_text(
+        json.dumps(
+            {
+                "late_interaction_model": cfg.models.late_interaction.name,
+                "beats_bag_of_tokens": True,
+                "config": cfg.models.muvera.model_dump(),
+                "recall_at": {str(at): 0.40, str(max(cfg.depths_for("nfcorpus"))): 0.99},
+            }
+        )
+    )
+    passed, reason = muvera_calibration_status(cfg, "nfcorpus")
+    assert not passed, reason
+    assert f"recall@{at}=0.40" in reason
 
 
 def test_a_cap_below_the_final_limit_is_rejected():

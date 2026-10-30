@@ -29,7 +29,7 @@ def calibration(cfg, nfcorpus, encoders):
         cfg.run.seeds.muvera,
         doc_tokens,
         query_tokens,
-        depths=tuple(cfg.depths_for("nfcorpus")),
+        depths=tuple(sorted({*cfg.depths_for("nfcorpus"), cfg.models.muvera.calibration_depth})),
         truth_k=cfg.run.execution.final_limit,
         # The collection's MUVERA vectors are centered on this mean, so the gate has to
         # measure the encoder the run actually queries.
@@ -58,11 +58,15 @@ def test_muvera_beats_bag_of_tokens(calibration):
 
 
 def test_muvera_prefetch_recall_is_usable_at_sweep_depths(cfg, calibration):
-    """A prefetch that loses the true top-10 makes the whole depth curve meaningless."""
-    deepest = max(cfg.depths_for("nfcorpus"))
-    recall = calibration.recall_at[deepest]
+    """A prefetch that loses the true top-10 makes the whole depth curve meaningless.
+
+    Read at the declared `muvera.calibration_depth`, so extending the depth ladder
+    cannot move the bar a recorded verdict was measured against.
+    """
+    at = cfg.models.muvera.calibration_depth
+    recall = calibration.recall_at[at]
     assert recall >= cfg.models.muvera.min_recall, (
-        f"MUVERA calibration FAILED: at the deepest sweep depth ({deepest}) the FDE "
+        f"MUVERA calibration FAILED: at the declared calibration depth ({at}) the FDE "
         f"prefetch recovers only {recall:.2%} of the exact max_sim top-"
         f"{cfg.run.execution.final_limit}. `muvera_late_interaction_rescore` would measure the FDE's "
         "recall ceiling rather than the value of late-interaction rescoring, and its curve would "

@@ -94,18 +94,23 @@ muvera:
   d_proj: 16
   # dim = n_reps * 2**k_sim * d_proj = 40 * 16 * 16 = 10240
   distance: cosine  # matches the Qdrant MUVERA tutorial's collection config
-  # Fraction of the exact max_sim top-10 the FDE must recover at a dataset's deepest
-  # candidate depth. A project convention, not a published standard: MUVERA's own paper
-  # reports recall of the single nearest neighbour under Chamfer, a far easier target,
-  # and tunes its candidate count per corpus to hit it.
+  # Fraction of the exact max_sim top-10 the FDE must recover at calibration_depth.
+  # A project convention, not a published standard: MUVERA's own paper reports recall of
+  # the single nearest neighbour under Chamfer, a far easier target, and tunes its
+  # candidate count per corpus to hit it.
   min_recall: 0.8
+  # The depth min_recall is read at. A fixed, declared rung rather than "the deepest
+  # depth swept", so that extending the depth ladder cannot move the bar a recorded
+  # pass/fail verdict was measured against. 500 is where this FDE setting was selected.
+  # Must be one of execution.depths.
+  calibration_depth: 500
   # The FDE setting is chosen once on the tuning datasets and then applied everywhere, so
   # a dataset whose calibration falls short is a result to report rather than a gap to
   # leave in the comparison. The verdict is recorded per dataset in the manifest.
   require_calibration: false
   # Swept by `tune-muvera` on each tuning dataset's held-out warmup queries, never on the
-  # evaluated ones. The selected setting is the smallest FDE whose recall@deepest-depth
-  # reaches min_recall on every tuning dataset; it is then checked per dataset with
+  # evaluated ones. The selected setting is the smallest FDE whose recall at
+  # calibration_depth reaches min_recall on every tuning dataset; it is then checked with
   # `calibrate-muvera` and judged end to end against the dense baseline.
   tuning_grid:
     k_sim: [4, 5, 6]
