@@ -34,6 +34,12 @@ def scoped(cfg, nfcorpus, tmp_path):
                             "raw": "gate4/raw",
                             "agg": "gate4/agg",
                             "queries": "gate4/queries",
+                            # Absolute, so redirecting `root` below moves the run outputs
+                            # without moving the embedding cache with them. The cache is
+                            # keyed by model, corpus and platform, so sharing it is safe,
+                            # and re-embedding the corpus per test would dominate this
+                            # gate's runtime while checking nothing it exists to check.
+                            "cache": str(cfg.paths["cache"]),
                         }
                     ),
                     # One repeat is enough to exercise the loop; resume is what is
