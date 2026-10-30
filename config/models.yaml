@@ -121,6 +121,16 @@ muvera:
     the same settings reach 0.68 and the arm is not usable at all.
 
 cross_encoder:
-  name: "Xenova/ms-marco-MiniLM-L-6-v2"
-  size_gb: 0.08
+  # FastEmbed ships no reranker that beats the dense baseline on every dataset here:
+  # ms-marco-MiniLM-L-6-v2 loses ndcg@10 on SciFact at every depth (-0.005 at 10,
+  # -0.021 at 50), because MS MARCO web passages are far from scientific claims.
+  # gte-reranker-modernbert-base gains on both of the datasets it was piloted on
+  # (SciFact +0.032, NFCorpus +0.023) and is registered from its own ONNX export,
+  # since FastEmbed does not ship it. It is ~10x slower per pair, which is what
+  # execution.arm_depth_caps pays for.
+  name: "Alibaba-NLP/gte-reranker-modernbert-base"
+  onnx:
+    hf: "Alibaba-NLP/gte-reranker-modernbert-base"
+    file: "onnx/model.onnx"
+  size_gb: 0.6
   license: "Apache-2.0"

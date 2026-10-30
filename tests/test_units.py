@@ -9,7 +9,9 @@ import inspect
 import json
 
 import pytest
+from pydantic import ValidationError
 
+from src.arms import REGISTRY, resolve_arms
 from src.config import ExecutionConfig, load_config
 from src.datasets import IdMap, IdMapError, _hold_out_warmup, _subsample
 from src.metrics import (
@@ -20,6 +22,7 @@ from src.metrics import (
     rbo,
     top_k_overlap,
 )
+from src.runner import build_plan
 from src.storage import RawRecord, RawWriter, completed_keys, repair_truncated, unit_slug
 from src.timing import EMBED_STAGES, QueryTimers
 
@@ -135,18 +138,21 @@ def test_cross_encoder_onnx_source_gets_its_own_identity_and_registers_once():
     from src.config import RerankerOnnxSource
     from src.embedding import _register_onnx_reranker
 
+    # The configured reranker is a custom ONNX file, so its identity must already differ
+    # from its bare HF name.
     cross = load_config().models.cross_encoder
-    assert cross.onnx is None and cross.model_id == cross.name
+    assert cross.onnx is not None and cross.model_id != cross.name
+
+    shipped = cross.model_copy(update={"name": "Xenova/ms-marco-MiniLM-L-6-v2", "onnx": None})
+    assert shipped.model_id == shipped.name
 
     custom = cross.model_copy(
         update={
-            "name": "Alibaba-NLP/gte-reranker-modernbert-base",
-            "onnx": RerankerOnnxSource(
-                hf="Alibaba-NLP/gte-reranker-modernbert-base", file="onnx/model.onnx"
-            ),
+            "name": "Xenova/ms-marco-MiniLM-L-6-v2",
+            "onnx": RerankerOnnxSource(hf="some-org/private-fork", file="onnx/model.onnx"),
         }
     )
-    assert custom.model_id != custom.name
+    assert custom.model_id != shipped.model_id
     _register_onnx_reranker(custom)
     _register_onnx_reranker(custom)
     names = [entry["model"] for entry in TextCrossEncoder.list_supported_models()]
@@ -452,13 +458,15 @@ def test_uncapped_subsample_returns_every_query_sorted():
     assert _subsample(ids, None, seed=1) == sorted(ids)
 
 
-def test_only_nfcorpus_sweeps_to_depth_500():
-    """NFCorpus is the only dataset still gaining quality past depth 200."""
+def test_every_dataset_sweeps_the_same_ladder_to_depth_1000():
+    """One ladder across datasets, so a depth is comparable wherever it is reported.
+
+    The deep rungs exist for MUVERA, whose break-even against dense sits past 200 on
+    most datasets; the cross-encoder opts out through arm_depth_caps instead.
+    """
     cfg = load_config()
-    assert cfg.depths_for("nfcorpus") == [10, 25, 50, 100, 200, 500]
-    for name in ("scifact", "scidocs", "fiqa", "quora"):
-        assert cfg.depths_for(name) == [10, 25, 50, 100, 200], name
-        assert 500 not in cfg.depths_for(name)
+    for name in ("nfcorpus", "scifact", "scidocs", "fiqa", "quora"):
+        assert cfg.depths_for(name) == [10, 25, 50, 100, 200, 500, 1000], name
 
 
 def test_enabled_datasets_are_ordered_smallest_first():
@@ -591,15 +599,23 @@ def test_resolve_arms_matches_the_default_set(tmp_path):
     assert set(cfg.run.arms.enabled) == set(REGISTRY)
 
 
+def _with_dataset_depths(cfg, dataset: str, depths: list[int]):
+    """A copy of `cfg` where one dataset carries its own depth override."""
+    spec = cfg.datasets.get(dataset).model_copy(update={"depths": depths})
+    datasets = dict(cfg.datasets.datasets) | {dataset: spec}
+    return cfg.model_copy(update={"datasets": cfg.datasets.model_copy(update={"datasets": datasets})})
+
+
 def test_per_dataset_depths_fall_back_to_the_global_sweep():
     """Depths are per dataset, with a global default to fall back on."""
     cfg = load_config()
-    # scifact sets no override, so it inherits the global sweep.
+    # No dataset currently overrides, so every one inherits the global sweep.
     assert cfg.datasets.get("scifact").depths is None
     assert cfg.depths_for("scifact") == cfg.run.execution.depths
-    # nfcorpus overrides, so it must NOT equal the global sweep.
-    assert cfg.datasets.get("nfcorpus").depths is not None
-    assert cfg.depths_for("nfcorpus") != cfg.run.execution.depths
+    # The override path still works for a dataset that sets one.
+    overridden = _with_dataset_depths(cfg, "nfcorpus", [10, 25])
+    assert overridden.depths_for("nfcorpus") == [10, 25]
+    assert overridden.depths_for("scifact") == cfg.run.execution.depths
     # Whatever a dataset resolves to, no depth may fall below the reported limit.
     for name in cfg.datasets.datasets:
         assert min(cfg.depths_for(name)) >= cfg.run.execution.final_limit, name
@@ -608,13 +624,63 @@ def test_per_dataset_depths_fall_back_to_the_global_sweep():
 def test_depths_override_wins_over_every_dataset_own_override():
     """`--depths` must win everywhere, including over a dataset's own `depths`.
 
-    A dataset that sets its own sweep (NFCorpus does) would otherwise silently ignore a
-    global-only override."""
-    cfg = load_config()
-    assert cfg.datasets.get("nfcorpus").depths is not None, "test assumes nfcorpus has its own override"
+    A dataset that sets its own sweep would otherwise silently ignore a global-only
+    override.
+    """
+    cfg = _with_dataset_depths(load_config(), "nfcorpus", [10, 25, 50, 100, 200, 500])
     overridden = cfg.with_depths_override([10, 50])
     assert overridden.depths_for("nfcorpus") == [10, 50]
     assert overridden.depths_for("scifact") == [10, 50]
+
+
+def test_cross_encoder_arms_are_capped_and_every_other_arm_is_not():
+    """The cap truncates the shared ladder; it never introduces a depth of its own."""
+    cfg = load_config()
+    caps = cfg.run.execution.arm_depth_caps
+    assert set(caps) == {"cross_encoder", "bm25_cross_encoder"}
+    for dataset in ("nfcorpus", "scifact", "scidocs", "fiqa", "quora"):
+        ladder = cfg.depths_for(dataset)
+        for arm in REGISTRY:
+            depths = cfg.depths_for_arm(dataset, arm)
+            assert set(depths) <= set(ladder), (dataset, arm)
+            expected = [d for d in ladder if d <= caps[arm]] if arm in caps else ladder
+            assert depths == expected, (dataset, arm)
+
+
+def test_depths_override_clears_the_per_arm_caps():
+    """An explicit --depths asks for exactly those depths on every arm, caps included."""
+    cfg = load_config().with_depths_override([10, 500])
+    assert cfg.run.execution.arm_depth_caps == {}
+    assert cfg.depths_for_arm("nfcorpus", "cross_encoder") == [10, 500]
+
+
+def test_build_plan_capped_arm_gets_fewer_units_than_an_uncapped_one():
+    cfg = load_config()
+    arms, _ = resolve_arms(cfg, "scifact")
+    by_arm: dict[str, list[int | None]] = {}
+    for unit in build_plan(cfg, arms, "scifact"):
+        by_arm.setdefault(unit.arm.name, []).append(unit.depth)
+    assert sorted(by_arm["cross_encoder"]) == [10, 25, 50]
+    assert sorted(by_arm["muvera_late_interaction_rescore"]) == [10, 25, 50, 100, 200, 500, 1000]
+    assert by_arm["dense"] == [None]
+
+
+def test_build_plan_rejects_a_cap_on_an_unknown_arm():
+    """A typo in arm_depth_caps must fail loudly, not silently cap nothing."""
+    cfg = load_config()
+    execution = cfg.run.execution.model_copy(update={"arm_depth_caps": {"cross_encodr": 50}})
+    broken = cfg.model_copy(update={"run": cfg.run.model_copy(update={"execution": execution})})
+    arms, _ = resolve_arms(broken, "scifact")
+    with pytest.raises(ValueError, match="unknown arm"):
+        build_plan(broken, arms, "scifact")
+
+
+def test_a_cap_below_the_final_limit_is_rejected():
+    """A capped arm must still be able to return the k documents it is scored on."""
+    payload = load_config().run.execution.model_dump()
+    payload["arm_depth_caps"] = {"cross_encoder": 5}
+    with pytest.raises(ValidationError, match="final_limit"):
+        ExecutionConfig.model_validate(payload)
 
 
 def test_resolve_arms_excludes_by_missing_representation():

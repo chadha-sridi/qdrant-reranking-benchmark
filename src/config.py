@@ -55,6 +55,13 @@ class ExecutionConfig(_Frozen):
     # `t_rerank_ms` stays a measured per-pair figure (throughput is depth-independent:
     # 28.6-29.1 pairs/s at depths 10-500). False restores fully isolated executions.
     share_pointwise_scores: bool = True
+    # Per-arm ceiling on the depth sweep, by arm name. An arm listed here runs the
+    # dataset's ladder truncated at its cap rather than a ladder of its own, so every
+    # depth it reports is a depth the other arms also report and the paired
+    # significance tests stay aligned. Exists because a client-side cross-encoder costs
+    # ~500x per candidate what a server-side rescore does, so one shared ladder deep
+    # enough for MUVERA is unaffordable for it.
+    arm_depth_caps: dict[str, int] = {}
 
     @model_validator(mode="after")
     def _check(self) -> ExecutionConfig:
@@ -65,6 +72,12 @@ class ExecutionConfig(_Frozen):
                 f"smallest depth {min(self.depths)} < final_limit {self.final_limit}; "
                 "prefetch.limit must be >= limit + offset"
             )
+        for arm, cap in self.arm_depth_caps.items():
+            if cap < self.final_limit:
+                raise ValueError(
+                    f"arm_depth_caps[{arm}] = {cap} < final_limit {self.final_limit}; "
+                    "a capped arm must still be able to return the final ranking"
+                )
         return self
 
 
@@ -404,12 +417,24 @@ class Config(_Frozen):
         spec = self.datasets.get(dataset)
         return list(spec.depths) if spec.depths else list(self.run.execution.depths)
 
+    def depths_for_arm(self, dataset: str | None, arm: str) -> list[int]:
+        """The dataset's ladder, truncated at this arm's cap when it has one.
+
+        Truncation rather than a separate ladder: a capped arm's depths stay a subset
+        of every other arm's, so arms remain comparable at every depth they share.
+        """
+        depths = self.depths_for(dataset) if dataset else list(self.run.execution.depths)
+        cap = self.run.execution.arm_depth_caps.get(arm)
+        return depths if cap is None else [d for d in depths if d <= cap]
+
     def with_depths_override(self, depths: list[int]) -> "Config":
         """Force `depths` everywhere, including over every dataset's own override.
 
         A plain global-depths update is not enough: `depths_for()` checks a dataset's
-        own override FIRST, so a dataset that has one (NFCorpus) would silently ignore
-        the global value while every other dataset appeared to honour it.
+        own override FIRST, so a dataset that has one would silently ignore the global
+        value while every other dataset appeared to honour it. Per-arm caps are dropped
+        for the same reason — an explicit --depths asks for exactly these depths on
+        every arm, which is what makes a deep diagnostic run on the capped arms possible.
         """
         cleared = {
             name: spec.model_copy(update={"depths": None}) for name, spec in self.datasets.datasets.items()
@@ -417,7 +442,11 @@ class Config(_Frozen):
         return self.model_copy(
             update={
                 "run": self.run.model_copy(
-                    update={"execution": self.run.execution.model_copy(update={"depths": list(depths)})}
+                    update={
+                        "execution": self.run.execution.model_copy(
+                            update={"depths": list(depths), "arm_depth_caps": {}}
+                        )
+                    }
                 ),
                 "datasets": self.datasets.model_copy(update={"datasets": cleared}),
             }

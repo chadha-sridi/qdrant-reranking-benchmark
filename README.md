@@ -287,32 +287,61 @@ dataset without touching Qdrant.
 
 ## Candidate depths
 
-Depths are per dataset, set from each one's measured relevance density rather than by
-feel. Override globally with `--depths`, or per
-dataset via `depths:` in `config/datasets.yaml`.
+One ladder — **10, 25, 50, 100, 200, 500, 1000** — on every dataset, with a per-arm
+ceiling for the arms that cannot afford its deep end. A shared ladder is what makes the
+paired significance tests work: a comparison at depth *d* needs both arms to have run at
+*d*, so a capped arm is truncated to a prefix of the ladder rather than given a ladder of
+its own. Override globally with `--depths` (which lifts the caps too), per dataset via
+`depths:` in `config/datasets.yaml`, or per arm via `execution.arm_depth_caps` in
+`config/run.yaml`.
 
-| Dataset | rel/query (avg / med / p75) | Depths |
-|---|---|---|
-| **NFCorpus** | 38.2 / 16 / 40 | 10, 25, 50, 100, 200, **500** |
-| SciFact | 1.1 / 1 / 1 | 10, 25, 50, 100, 200 |
-| SCIDOCS | 4.9 / 5 / 5 | 10, 25, 50, 100, 200 |
-| FiQA-2018 | 2.6 / 2 / 3 | 10, 25, 50, 100, 200 |
-| Quora | 1.6 / 1 / 1 | 10, 25, 50, 100, 200 |
+| Arm | Depths swept |
+|---|---|
+| `late_interaction_rescore`, `bm25_late_interaction_rescore` | 10 … 1000 |
+| `muvera_late_interaction_rescore` | 10 … 1000 |
+| `cross_encoder`, `bm25_cross_encoder` | 10, 25, 50 |
+| `dense`, `bm25` | baselines, no sweep |
 
-**NFCorpus is the only dataset that sweeps to 500**, because it is the only one still
-gaining quality at that depth — its judgments are an order of magnitude denser than
-anything else here (p75 of 40 relevant docs, max 475). It is also the cheapest place to
-sweep deep: 323 queries, smallest corpus.
+**The ladder runs to 1000 for MUVERA, not for quality headroom.** MUVERA replaces the
+multivector first stage with a single fixed-dimensional encoding, trading prefetch
+accuracy for a cheaper retrieve; it earns that trade back by retrieving more candidates.
+Its break-even against the dense baseline sits near depth 100 on SciFact and between 500
+and 1000 on NFCorpus and SciDocs, so a ladder that stopped at 200 would cut the curve off
+just below the crossover and report the arm as a loss on two datasets out of three.
+Server-side rescoring costs 20–50 ms/query at any depth, so the two extra rungs add ~15
+minutes across the whole benchmark.
 
-For the other four, every relevant document sits within depth 50, so depth 200 is
-already ~4× past saturation — enough to *show* the plateau, which is the deliverable.
-Adding 500 there would contribute a second flat point for 56% of the compute, since
-runtime scales with the **sum** of the depths, not their count.
+**The cross-encoder stops at 50** because it is the one arm that reranks client-side: a
+transformer forward pass per (query, document) pair, ~2.8 pairs/s on real abstracts
+against 20–50 ms for an entire server-side rescore. Sweeping it to 1000 would cost ~155 h
+— roughly 95% of the benchmark — to extend a curve that is already flat by depth 50 on
+every dataset here. With `share_pointwise_scores` on, depths 10 and 25 come free as
+subsets of the depth-50 pass.
 
-Two caveats for any write-up: depth 500 on NFCorpus reranks ~14% of that corpus, a far
-higher ratio than production would use; and the relevance figures above are a *capacity
-ceiling* from qrels, not first-stage recall — whether the dense baseline actually places
-relevant documents in the candidate set is measured, not assumed.
+Relevance density, the reason the first five rungs are where they are:
+
+| Dataset | rel/query (avg / med / p75) | Corpus | Depth 1000 as % of corpus |
+|---|---|---|---:|
+| **NFCorpus** | 38.2 / 16 / 40 | 3,633 | 28% |
+| SciFact | 1.1 / 1 / 1 | 5,183 | 19% |
+| SCIDOCS | 4.9 / 5 / 5 | 25,657 | 3.9% |
+| FiQA-2018 | 2.6 / 2 / 3 | 57,638 | 1.7% |
+| Quora | 1.6 / 1 / 1 | 522,931 | 0.2% |
+
+Caveats for any write-up:
+
+- **The deep rungs are diagnostic points, not operating points.** On NFCorpus depth 1000
+  reranks 28% of the corpus and depth 500 reranks 14%; on SciFact, 19% and 10%. They
+  exist to locate MUVERA's crossover, and no deployment would rerank a quarter of its
+  corpus. Report them as a recall curve, not as a recommended configuration.
+- **The cross-encoder's depth curve ends at 50**, so it cannot be compared with the other
+  arms past that point. Its absence from the depth-100+ rows is a budget decision, not a
+  measurement.
+- **Relevance density is a capacity ceiling from qrels, not first-stage recall.** Whether
+  the first stage actually places relevant documents in the candidate set is measured
+  separately (`recall_at_pool_depth`), not assumed.
+- **SciFact has the least statistical power here** — 250 evaluated queries at 1.1
+  relevant documents each — so a small gain can be real and still fail significance.
 
 ---
 
@@ -347,51 +376,47 @@ cross-encoder arms' wall-clock drops ~45% against the figures below, which preda
 BM25 needs no embedding: Qdrant builds its index from the stored text during upload.
 
 **Per full run** — querying at `repeats: 1`, all seven arms, every evaluated query. The
-two cross-encoder arms are ~98% of it, each costing what `cross_encoder` alone measured
-in the four-arm run; the figures below are that run's measurements with the second
-cross-encoder arm added, not yet re-measured:
+two cross-encoder arms are ~97% of it even capped at depth 50, since
+gte-reranker-modernbert-base scores ~2.8 pairs/s on real abstracts. Projected from the
+measured per-pair throughput of each model:
 
-| Dataset | Depths | Evaluated queries | Est. hours |
-|---|---|---:|---:|
-| nfcorpus | 10/25/50/100/200/500 | 273 | ~5.5h |
-| scifact | 10/25/50/100/200 | 250 | ~2.4h |
-| scidocs | 10/25/50/100/200 | 950 | ~7.7h |
-| fiqa | 10/25/50/100/200 | 598 | ~4.9h |
-| **`--dataset all` total** | | **2,071** | **~20.5h** |
-| quora *(separate, capped)* | 10/25/50/100/200 | 450 | ~3.5h |
-| quora *(uncapped, if you lift the cap)* | 10/25/50/100/200 | 9,950 | ~76h |
+| Dataset | Evaluated queries | Cross-encoder arms | Everything else | Est. hours |
+|---|---:|---:|---:|---:|
+| nfcorpus | 273 | ~2.3h | ~6 min | **~2.4h** |
+| scifact | 250 | ~2.1h | ~4 min | **~2.2h** |
+| scidocs | 950 | ~7.5h | ~24 min | **~7.9h** |
+| fiqa | 598 | ~5.0h | ~16 min | **~5.3h** |
+| **`--dataset all` total** | **2,071** | | | **~17.8h** |
+| quora *(separate, capped at 500 queries)* | 450 | ~3.8h | ~10 min | ~3.9h |
+| quora *(uncapped, if you lift the cap)* | 9,950 | | | ~85h |
 
 Quora sits out of the default set for exactly this reason: uncapped it is ~80% of the
 total for a dataset that saturates by depth 50.
 
-Measured per-query cost at depth 500 shows where it all goes:
+Measured per-query cost at depth 50 shows where it all goes:
 
-| Arm | ms/query @ depth 500 |
+| Arm | ms/query @ depth 50 |
 |---|---:|
-| **`cross_encoder`** | **17,319** |
-| `muvera_late_interaction_rescore` | 129 |
-| `late_interaction_rescore` | 112 |
-| `dense` (no depth) | 10 |
+| **`cross_encoder`** | **~19,000** |
+| `late_interaction_rescore` | 41 |
+| `muvera_late_interaction_rescore` | 39 |
+| `dense` (no depth) | 13 |
 
-The cross-encoder arms dominate because they are the only ones that rerank client-side: a
-transformer forward pass per (query, document) pair on CPU, where every other arm
-pushes the work into Qdrant as vector arithmetic. Its cost scales linearly with the
-**sum** of the swept depths, so the deepest point dominates — depth 500 alone is 56% of
-NFCorpus's cross-encoder cost.
+Three orders of magnitude, and the reason is architectural: the cross-encoder arms are
+the only ones that rerank client-side, a transformer forward pass per (query, document)
+pair on CPU, where every other arm pushes the work into Qdrant as vector arithmetic. That
+contrast is a result the benchmark exists to report, not an inefficiency to tune away.
 
 Levers, in order of effect:
 
 | Change | Saves | Costs you |
 |---|---|---|
-| Lift Quora's 500-query cap | costs ~72h | tighter CI on the one large-corpus dataset |
-| Cap the cross-encoder arms at depth ≤100 | ~75% of their cost | the deep end of their depth curves only |
-| Drop NFCorpus depth 500 | ~2.6h | the only depth point past 200 with real headroom |
-| Run one family only (`--arms`) | ~10h of the ~20.5h | the other first stage |
-| Drop both cross-encoder arms | ~20h of the ~20.5h | your only client-side reranking arms |
-
-Depth 500 on NFCorpus costs 17.4s/query per cross-encoder arm — ~1.3h each, roughly
-half of NFCorpus's total. It is kept because NFCorpus (38 relevant docs/query) is the only
-dataset with real quality headroom past depth 200.
+| Lift Quora's 500-query cap | costs ~81h | tighter CI on the one large-corpus dataset |
+| Drop both cross-encoder arms | ~17h of the ~17.8h | your only client-side reranking arms |
+| Lower `arm_depth_caps` to 25 | ~9h | the depth-50 point on both cross-encoder arms |
+| Swap in a smaller cross-encoder | up to ~16h | quality: MiniLM-L6 is ~12× faster and loses to the dense baseline on SciFact |
+| Run one family only (`--arms`) | ~9h of the ~17.8h | the other first stage |
+| Drop depths 500 and 1000 | ~15 min | MUVERA's crossover, the thing those rungs exist to find |
 
 ---
 

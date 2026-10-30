@@ -32,11 +32,10 @@ datasets:
     enabled: true
     # 38.2 relevant docs/query (median 16, p75 40, max 475) — an order of magnitude
     # denser than anything else here, and the only dataset still gaining quality past
-    # depth 200, so it is the only one that sweeps to 500. It is also the cheapest place
-    # to do that: 323 queries and the smallest corpus.
-    # Caveat: depth 500 is ~14% of this corpus, a far higher rerank ratio than
-    # production would use.
-    depths: [10, 25, 50, 100, 200, 500]
+    # depth 200. No override: run.yaml's ladder now reaches 1000 for every dataset.
+    # Caveat for the writeup: at 3,633 documents, depth 500 is 14% of this corpus and
+    # depth 1000 is 28%. Those two rungs are diagnostic points for the MUVERA
+    # recall curve, not operating points anyone would deploy.
     notes: "development and smoke-test target; Gate 1 reference dataset"
 
   scifact:
@@ -51,6 +50,10 @@ datasets:
     enabled: true
     # 1.1 relevant docs/query — essentially one correct answer per claim. Depth past
     # ~25 buys no quality headroom, only latency signal.
+    # Caveat for the writeup: 250 evaluated queries at 1.1 relevant docs each is the
+    # least statistical power of any dataset here, so a small ndcg@10 gain will often
+    # fail significance even when it is real. Also, depth 1000 is 19% of this 5,183-doc
+    # corpus (depth 500 is 10%) — diagnostic rungs for MUVERA, not operating points.
 
   scidocs:
     hf_corpus: "BeIR/scidocs"

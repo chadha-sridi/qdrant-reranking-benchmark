@@ -25,13 +25,26 @@ execution:
   final_limit: 10             # k for ndcg@10 / recall@10
   max_stored_results: 100     # capped to min(this, depth)
   flush_every: 25             # fsync cadence on raw JSONL
-  # Default candidate depths, grounded in the measured relevant-docs-per-query
-  # distribution of the enabled datasets rather than picked by feel.
-  # Four of five datasets have every relevant document inside depth 50, so 200 is
-  # already ~4x past saturation and depth 500 would add a second flat point for 56% of
-  # the compute. NFCorpus overrides this upward in datasets.yaml — it is the one dataset
-  # still gaining at depth.
-  depths: [10, 25, 50, 100, 200]
+  # Candidate depths. The first five are grounded in the measured
+  # relevant-docs-per-query distribution: four of five datasets have every relevant
+  # document inside depth 50, so 200 is already ~4x past saturation for them.
+  # 500 and 1000 exist for the MUVERA arm, not for quality headroom. MUVERA trades
+  # prefetch accuracy for a single-vector first stage, and its break-even against the
+  # dense baseline sits near depth 100 on SciFact and between 500 and 1000 on NFCorpus
+  # and SciDocs; a ladder that stopped at 200 would cut the curve off just below the
+  # crossover and report the arm as a loss on two datasets out of three. The server-side
+  # arms cost ~20-50 ms/query at any depth, so the two extra rungs add ~15 min across
+  # the whole benchmark. The cross-encoder arms cannot afford them and are capped below.
+  depths: [10, 25, 50, 100, 200, 500, 1000]
+  # The cross-encoder scores every candidate with a full transformer forward pass:
+  # ~2.8 pairs/s for gte-reranker-modernbert-base on real abstracts, against ~20-50 ms
+  # for a whole server-side rescore. Sweeping it to 1000 would cost ~155 h, roughly
+  # 95% of the benchmark, to extend a curve that is already flat by depth 50 on every
+  # dataset. Capped at 50, and with share_pointwise_scores on, depths 10 and 25 come
+  # free as subsets of the depth-50 pass.
+  arm_depth_caps:
+    cross_encoder: 50
+    bm25_cross_encoder: 50
   # The three server-side rescoring arms (*_late_interaction_rescore) each pay one extra,
   # untimed Qdrant call per query to measure how many relevant docs survived their
   # prefetch stage. Real added wall-clock cost (roughly doubles those arms' own

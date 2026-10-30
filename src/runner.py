@@ -20,7 +20,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 
-from .arms import ArmContext, ArmSpec, resolve_arms
+from .arms import REGISTRY, ArmContext, ArmSpec, resolve_arms
 from .config import Config
 from .datasets import LoadedDataset
 from .embedding import Encoders
@@ -56,15 +56,29 @@ def build_plan(cfg: Config, arms: Sequence[ArmSpec], dataset: str | None = None)
 
     Depths come from the dataset's own override when it has one, else the global sweep
     — the useful depth range depends on how many relevant documents a dataset
-    actually has per query.
+    actually has per query. An arm named in `execution.arm_depth_caps` runs that same
+    ladder truncated at its cap.
     """
-    depths = cfg.depths_for(dataset) if dataset else list(cfg.run.execution.depths)
+    unknown = sorted(set(cfg.run.execution.arm_depth_caps) - set(REGISTRY))
+    if unknown:
+        raise ValueError(
+            f"arm_depth_caps names unknown arm(s): {', '.join(unknown)}. "
+            f"Known arms: {', '.join(sorted(REGISTRY))}"
+        )
+
     units: list[Unit] = []
     for arm in arms:
-        if arm.sweeps_depth:
-            units.extend(Unit(arm=arm, depth=depth) for depth in depths)
-        else:
+        if not arm.sweeps_depth:
             units.append(Unit(arm=arm, depth=None))
+            continue
+        depths = cfg.depths_for_arm(dataset, arm.name)
+        if not depths:
+            raise ValueError(
+                f"arm {arm.name} has no depths left: cap "
+                f"{cfg.run.execution.arm_depth_caps[arm.name]} excludes every depth in "
+                f"{cfg.depths_for(dataset) if dataset else list(cfg.run.execution.depths)}"
+            )
+        units.extend(Unit(arm=arm, depth=depth) for depth in depths)
 
     rng = np.random.default_rng(cfg.run.seeds.plan_shuffle)
     order = rng.permutation(len(units))

@@ -22,15 +22,19 @@ pytestmark = [pytest.mark.gate, pytest.mark.slow]
 def calibration(cfg, nfcorpus, encoders):
     from src.muvera import calibrate, calibration_inputs
 
-    doc_tokens, query_tokens = calibration_inputs(cfg, nfcorpus, encoders)
+    doc_tokens, query_tokens, mean = calibration_inputs(cfg, nfcorpus, encoders)
     result = calibrate(
         cfg.models.muvera,
         cfg.models.late_interaction.dim,
         cfg.run.seeds.muvera,
         doc_tokens,
         query_tokens,
-        depths=tuple(cfg.depths_for("nfcorpus")),  # nfcorpus's own (deeper) sweep, not the global default
+        depths=tuple(cfg.depths_for("nfcorpus")),
         truth_k=cfg.run.execution.final_limit,
+        # The collection's MUVERA vectors are centered on this mean, so the gate has to
+        # measure the encoder the run actually queries.
+        mean=mean,
+        workers=cfg.run.ingestion.muvera_workers or None,
     )
     payload = result.as_dict() | {
         "config": cfg.models.muvera.model_dump(),
