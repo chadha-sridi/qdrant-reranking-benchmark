@@ -20,3 +20,7 @@ results_smoke/
 
 # Archived runs kept for reference, not for publication.
 results_archive/
+DECISIONS.md
+spec.md
+diagrams/
+diagram_data/
