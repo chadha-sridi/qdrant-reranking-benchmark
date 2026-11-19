@@ -83,6 +83,7 @@ def encode_documents(
     *,
     mean: np.ndarray | None = None,
     workers: int | None = None,
+    batch_size: int = 2048,
 ) -> np.ndarray:
     """FDE-encode a corpus, split across worker processes.
 
@@ -90,6 +91,11 @@ def encode_documents(
     Documents are encoded independently, and the matrices rebuild deterministically from
     (config, token_dim, seed), so the split cannot change any output. `workers=None`
     picks one per CPU, scaled down so small corpora stay serial.
+
+    Work is dispatched in `batch_size` batches, one window of `workers` batches at a
+    time, so the tokens in flight stay bounded by the batch size rather than by the
+    corpus: a slice-per-worker split sends a corpus-sized payload through the pickler
+    and is what makes this unusable at several hundred thousand documents.
     """
     doc_tokens = list(doc_tokens)
     if not doc_tokens:
@@ -101,13 +107,19 @@ def encode_documents(
         return np.stack(
             [muvera.process_document(center_tokens(d, mean)) for d in doc_tokens]
         ).astype(np.float32)
-    bounds = np.linspace(0, len(doc_tokens), workers + 1, dtype=int)
-    slices = [(doc_tokens[a:b], mean) for a, b in zip(bounds, bounds[1:]) if b > a]
+    encoded: list[np.ndarray] = []
+    window = batch_size * workers
     with ProcessPoolExecutor(
-        max_workers=len(slices), initializer=_init_worker,
+        max_workers=workers, initializer=_init_worker,
         initargs=(cfg.model_dump(), token_dim, seed),
     ) as pool:
-        return np.concatenate(list(pool.map(_encode_slice, slices)), axis=0)
+        for start in range(0, len(doc_tokens), window):
+            batches = [
+                (doc_tokens[a:a + batch_size], mean)
+                for a in range(start, min(start + window, len(doc_tokens)), batch_size)
+            ]
+            encoded.extend(pool.map(_encode_slice, batches))
+    return np.concatenate(encoded, axis=0)
 
 
 def build_muvera(cfg: MuveraModel, token_dim: int, seed: int):
