@@ -8,19 +8,21 @@ __pycache__/
 # Regenerate on the target machine.
 cache/
 
-# Raw measurements and aggregates are run outputs. Commit them deliberately, per
-# published run, rather than incidentally.
+# The published run commits its aggregates, query samples and manifest. Raw per-query
+# records are too large for the repository.
 results/raw/
-results/agg/
-results/queries/
-!results/.gitkeep
 
 # Disposable smoke-test output (scripts/smoke.py) — same category as results/raw above.
 results_smoke/
 
-# Archived runs kept for reference, not for publication.
+# Archived runs and VM working copies, kept for reference, not for publication.
 results_archive/
+vm_pull/
 DECISIONS.md
+LEARNINGS.md
 spec.md
 diagrams/
 diagram_data/
+
+# Local Claude Code settings.
+.claude/

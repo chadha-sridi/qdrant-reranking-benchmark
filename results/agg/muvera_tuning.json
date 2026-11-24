@@ -1,0 +1,776 @@
+{
+  "grid": {
+    "d_proj": [
+      16,
+      32
+    ],
+    "datasets": [
+      "nfcorpus",
+      "scifact"
+    ],
+    "k_sim": [
+      4,
+      5,
+      6
+    ],
+    "n_reps": [
+      20,
+      40
+    ]
+  },
+  "late_interaction_model": "lightonai/LateOn",
+  "min_recall": 0.8,
+  "rows": [
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "nfcorpus",
+      "dim": 5120,
+      "fde_bytes_per_doc": 20480,
+      "k_sim": 4,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": true,
+      "recall_at": {
+        "10": 0.22400000000000003,
+        "100": 0.6499999999999999,
+        "200": 0.7879999999999997,
+        "25": 0.39,
+        "50": 0.5180000000000001,
+        "500": 0.8879999999999998
+      },
+      "recall_at_deepest": 0.8879999999999998,
+      "spearman_vs_chamfer": 0.5385137657927264
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "nfcorpus",
+      "dim": 10240,
+      "fde_bytes_per_doc": 40960,
+      "k_sim": 4,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.28400000000000003,
+        "100": 0.7619999999999999,
+        "200": 0.8479999999999999,
+        "25": 0.4699999999999999,
+        "50": 0.6180000000000001,
+        "500": 0.9199999999999998
+      },
+      "recall_at_deepest": 0.9199999999999998,
+      "spearman_vs_chamfer": 0.6400960644950173
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "nfcorpus",
+      "dim": 10240,
+      "fde_bytes_per_doc": 40960,
+      "k_sim": 4,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": true,
+      "recall_at": {
+        "10": 0.27,
+        "100": 0.7319999999999998,
+        "200": 0.8360000000000001,
+        "25": 0.45599999999999996,
+        "50": 0.6140000000000001,
+        "500": 0.9199999999999998
+      },
+      "recall_at_deepest": 0.9199999999999998,
+      "spearman_vs_chamfer": 0.6621013020406811
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "nfcorpus",
+      "dim": 10240,
+      "fde_bytes_per_doc": 40960,
+      "k_sim": 5,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": true,
+      "recall_at": {
+        "10": 0.24999999999999992,
+        "100": 0.6819999999999999,
+        "200": 0.7839999999999999,
+        "25": 0.42599999999999993,
+        "50": 0.5519999999999999,
+        "500": 0.9199999999999998
+      },
+      "recall_at_deepest": 0.9199999999999998,
+      "spearman_vs_chamfer": 0.5559446624693741
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "nfcorpus",
+      "dim": 20480,
+      "fde_bytes_per_doc": 81920,
+      "k_sim": 4,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.28600000000000003,
+        "100": 0.74,
+        "200": 0.848,
+        "25": 0.47600000000000003,
+        "50": 0.6299999999999999,
+        "500": 0.9399999999999998
+      },
+      "recall_at_deepest": 0.9399999999999998,
+      "spearman_vs_chamfer": 0.6402612652727988
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "nfcorpus",
+      "dim": 20480,
+      "fde_bytes_per_doc": 81920,
+      "k_sim": 5,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.3240000000000001,
+        "100": 0.79,
+        "200": 0.8859999999999998,
+        "25": 0.5160000000000001,
+        "50": 0.6779999999999999,
+        "500": 0.954
+      },
+      "recall_at_deepest": 0.954,
+      "spearman_vs_chamfer": 0.644238920480911
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "nfcorpus",
+      "dim": 20480,
+      "fde_bytes_per_doc": 81920,
+      "k_sim": 5,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": true,
+      "recall_at": {
+        "10": 0.30799999999999994,
+        "100": 0.7299999999999999,
+        "200": 0.8419999999999996,
+        "25": 0.4660000000000001,
+        "50": 0.614,
+        "500": 0.9359999999999998
+      },
+      "recall_at_deepest": 0.9359999999999998,
+      "spearman_vs_chamfer": 0.6223199074957928
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "nfcorpus",
+      "dim": 20480,
+      "fde_bytes_per_doc": 81920,
+      "k_sim": 6,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": true,
+      "recall_at": {
+        "10": 0.22799999999999992,
+        "100": 0.69,
+        "200": 0.792,
+        "25": 0.39800000000000013,
+        "50": 0.536,
+        "500": 0.898
+      },
+      "recall_at_deepest": 0.898,
+      "spearman_vs_chamfer": 0.5471705584809772
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "nfcorpus",
+      "dim": 40960,
+      "fde_bytes_per_doc": 163840,
+      "k_sim": 5,
+      "larger_than_multivectors": true,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.3319999999999999,
+        "100": 0.7859999999999998,
+        "200": 0.8779999999999997,
+        "25": 0.534,
+        "50": 0.68,
+        "500": 0.9519999999999998
+      },
+      "recall_at_deepest": 0.9519999999999998,
+      "spearman_vs_chamfer": 0.6485605052400394
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "nfcorpus",
+      "dim": 40960,
+      "fde_bytes_per_doc": 163840,
+      "k_sim": 6,
+      "larger_than_multivectors": true,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.32000000000000006,
+        "100": 0.7859999999999997,
+        "200": 0.8839999999999997,
+        "25": 0.5379999999999999,
+        "50": 0.662,
+        "500": 0.9519999999999997
+      },
+      "recall_at_deepest": 0.9519999999999997,
+      "spearman_vs_chamfer": 0.6347425257280435
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "nfcorpus",
+      "dim": 40960,
+      "fde_bytes_per_doc": 163840,
+      "k_sim": 6,
+      "larger_than_multivectors": true,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": true,
+      "recall_at": {
+        "10": 0.26199999999999996,
+        "100": 0.7140000000000001,
+        "200": 0.8219999999999998,
+        "25": 0.4259999999999998,
+        "50": 0.566,
+        "500": 0.9319999999999997
+      },
+      "recall_at_deepest": 0.9319999999999997,
+      "spearman_vs_chamfer": 0.5477184347398928
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.013999999999999999,
+        "100": 0.07800000000000003,
+        "200": 0.12999999999999998,
+        "25": 0.027999999999999997,
+        "50": 0.056000000000000015,
+        "500": 0.2299999999999999
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "nfcorpus",
+      "dim": 81920,
+      "fde_bytes_per_doc": 327680,
+      "k_sim": 6,
+      "larger_than_multivectors": true,
+      "multivector_bytes_per_doc": 121566.38810900082,
+      "n_documents": 3633,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.34,
+        "100": 0.8059999999999996,
+        "200": 0.8800000000000001,
+        "25": 0.5539999999999999,
+        "50": 0.6899999999999998,
+        "500": 0.9619999999999997
+      },
+      "recall_at_deepest": 0.9619999999999997,
+      "spearman_vs_chamfer": 0.6418543353962796
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "scifact",
+      "dim": 5120,
+      "fde_bytes_per_doc": 20480,
+      "k_sim": 4,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": false,
+      "recall_at": {
+        "10": 0.30999999999999994,
+        "100": 0.6360000000000001,
+        "200": 0.75,
+        "25": 0.42200000000000004,
+        "50": 0.534
+      },
+      "recall_at_deepest": 0.75,
+      "spearman_vs_chamfer": 0.495623816615652
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "scifact",
+      "dim": 10240,
+      "fde_bytes_per_doc": 40960,
+      "k_sim": 4,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.38600000000000023,
+        "100": 0.7799999999999998,
+        "200": 0.8499999999999999,
+        "25": 0.574,
+        "50": 0.682
+      },
+      "recall_at_deepest": 0.8499999999999999,
+      "spearman_vs_chamfer": 0.6580666546558145
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "scifact",
+      "dim": 10240,
+      "fde_bytes_per_doc": 40960,
+      "k_sim": 4,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": true,
+      "recall_at": {
+        "10": 0.33399999999999996,
+        "100": 0.7360000000000001,
+        "200": 0.8139999999999997,
+        "25": 0.484,
+        "50": 0.628
+      },
+      "recall_at_deepest": 0.8139999999999997,
+      "spearman_vs_chamfer": 0.6033903926914442
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "scifact",
+      "dim": 10240,
+      "fde_bytes_per_doc": 40960,
+      "k_sim": 5,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": false,
+      "recall_at": {
+        "10": 0.2799999999999999,
+        "100": 0.6539999999999998,
+        "200": 0.754,
+        "25": 0.43400000000000005,
+        "50": 0.5519999999999999
+      },
+      "recall_at_deepest": 0.754,
+      "spearman_vs_chamfer": 0.564312535565229
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "scifact",
+      "dim": 20480,
+      "fde_bytes_per_doc": 81920,
+      "k_sim": 4,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.3760000000000001,
+        "100": 0.7879999999999999,
+        "200": 0.872,
+        "25": 0.5799999999999998,
+        "50": 0.714
+      },
+      "recall_at_deepest": 0.872,
+      "spearman_vs_chamfer": 0.6680386179248703
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "scifact",
+      "dim": 20480,
+      "fde_bytes_per_doc": 81920,
+      "k_sim": 5,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.3660000000000001,
+        "100": 0.7440000000000001,
+        "200": 0.8220000000000001,
+        "25": 0.5420000000000001,
+        "50": 0.6499999999999999
+      },
+      "recall_at_deepest": 0.8220000000000001,
+      "spearman_vs_chamfer": 0.5947398523189789
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "scifact",
+      "dim": 20480,
+      "fde_bytes_per_doc": 81920,
+      "k_sim": 5,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": false,
+      "recall_at": {
+        "10": 0.336,
+        "100": 0.6959999999999998,
+        "200": 0.7919999999999997,
+        "25": 0.488,
+        "50": 0.5960000000000002
+      },
+      "recall_at_deepest": 0.7919999999999997,
+      "spearman_vs_chamfer": 0.5261558348840388
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "scifact",
+      "dim": 20480,
+      "fde_bytes_per_doc": 81920,
+      "k_sim": 6,
+      "larger_than_multivectors": false,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": false,
+      "recall_at": {
+        "10": 0.324,
+        "100": 0.6880000000000002,
+        "200": 0.79,
+        "25": 0.478,
+        "50": 0.5719999999999998
+      },
+      "recall_at_deepest": 0.79,
+      "spearman_vs_chamfer": 0.517251867642046
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "scifact",
+      "dim": 40960,
+      "fde_bytes_per_doc": 163840,
+      "k_sim": 5,
+      "larger_than_multivectors": true,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.3920000000000002,
+        "100": 0.7959999999999999,
+        "200": 0.8759999999999998,
+        "25": 0.582,
+        "50": 0.708
+      },
+      "recall_at_deepest": 0.8759999999999998,
+      "spearman_vs_chamfer": 0.6276342296728976
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 16,
+      "dataset": "scifact",
+      "dim": 40960,
+      "fde_bytes_per_doc": 163840,
+      "k_sim": 6,
+      "larger_than_multivectors": true,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.43000000000000016,
+        "100": 0.7960000000000003,
+        "200": 0.8859999999999997,
+        "25": 0.5979999999999999,
+        "50": 0.706
+      },
+      "recall_at_deepest": 0.8859999999999997,
+      "spearman_vs_chamfer": 0.6210419540925567
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "scifact",
+      "dim": 40960,
+      "fde_bytes_per_doc": 163840,
+      "k_sim": 6,
+      "larger_than_multivectors": true,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 20,
+      "passes": true,
+      "recall_at": {
+        "10": 0.38400000000000006,
+        "100": 0.7740000000000002,
+        "200": 0.8539999999999999,
+        "25": 0.568,
+        "50": 0.6640000000000001
+      },
+      "recall_at_deepest": 0.8539999999999999,
+      "spearman_vs_chamfer": 0.6203256873814504
+    },
+    {
+      "bag_recall_at": {
+        "10": 0.006000000000000001,
+        "100": 0.04400000000000001,
+        "200": 0.086,
+        "25": 0.013999999999999999,
+        "50": 0.019999999999999997
+      },
+      "beats_bag_of_tokens": true,
+      "d_proj": 32,
+      "dataset": "scifact",
+      "dim": 81920,
+      "fde_bytes_per_doc": 327680,
+      "k_sim": 6,
+      "larger_than_multivectors": true,
+      "multivector_bytes_per_doc": 117712.68223036852,
+      "n_documents": 5183,
+      "n_queries": 50,
+      "n_reps": 40,
+      "passes": true,
+      "recall_at": {
+        "10": 0.44400000000000006,
+        "100": 0.8099999999999998,
+        "200": 0.8939999999999997,
+        "25": 0.6220000000000001,
+        "50": 0.7259999999999998
+      },
+      "recall_at_deepest": 0.8939999999999997,
+      "spearman_vs_chamfer": 0.6077283840221448
+    }
+  ],
+  "rule": "smallest FDE whose recall@deepest-depth reaches min_recall and beats bag-of-tokens on every tuning dataset, on held-out warmup queries",
+  "selected": {
+    "d_proj": 16,
+    "dim": 10240,
+    "k_sim": 4,
+    "n_reps": 40
+  }
+}

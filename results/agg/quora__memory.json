@@ -1,0 +1,204 @@
+{
+  "caveat": "Qdrant's own estimates: ram_bytes runs 10-15% low (untracked third-party allocations); cached_bytes is Unix-only.",
+  "collection": "quora",
+  "dataset": "quora",
+  "id_tracker": {
+    "cached_bytes": 11047055,
+    "disk_bytes": 11047055,
+    "expected_cache_bytes": 0,
+    "ram_bytes": 19021764,
+    "working_set_bytes": 19021764
+  },
+  "n_documents": 522931,
+  "n_token_vectors": 8266464,
+  "payload": {
+    "cached_bytes": 6818162,
+    "disk_bytes": 415632984,
+    "expected_cache_bytes": 0,
+    "ram_bytes": 0,
+    "working_set_bytes": 0
+  },
+  "payload_indexes": {
+    "text": {
+      "cached_bytes": 4787,
+      "disk_bytes": 88571881,
+      "expected_cache_bytes": 0,
+      "ram_bytes": 66209127,
+      "working_set_bytes": 66209127
+    }
+  },
+  "qdrant_version": "v1.20.0",
+  "representations": {
+    "bm25": {
+      "index": {
+        "cached_bytes": 4787,
+        "disk_bytes": 88571881,
+        "expected_cache_bytes": 0,
+        "ram_bytes": 66209127,
+        "working_set_bytes": 66209127
+      },
+      "name": "bm25",
+      "total": {
+        "cached_bytes": 4787,
+        "disk_bytes": 88571881,
+        "expected_cache_bytes": 0,
+        "ram_bytes": 66209127,
+        "working_set_bytes": 66209127
+      }
+    },
+    "dense": {
+      "index": {
+        "cached_bytes": 23413830,
+        "disk_bytes": 29691257,
+        "expected_cache_bytes": 29691257,
+        "ram_bytes": 0,
+        "working_set_bytes": 29691257
+      },
+      "name": "dense",
+      "storage": {
+        "cached_bytes": 803287654,
+        "disk_bytes": 804336230,
+        "expected_cache_bytes": 804336230,
+        "ram_bytes": 0,
+        "working_set_bytes": 804336230
+      },
+      "total": {
+        "cached_bytes": 826701484,
+        "disk_bytes": 834027487,
+        "expected_cache_bytes": 834027487,
+        "ram_bytes": 0,
+        "working_set_bytes": 834027487
+      }
+    },
+    "late_interaction": {
+      "index": {
+        "cached_bytes": 2224686,
+        "disk_bytes": 2226952,
+        "expected_cache_bytes": 2226952,
+        "ram_bytes": 0,
+        "working_set_bytes": 2226952
+      },
+      "name": "late_interaction",
+      "storage": {
+        "cached_bytes": 516,
+        "disk_bytes": 4844423000,
+        "expected_cache_bytes": 0,
+        "ram_bytes": 0,
+        "working_set_bytes": 0
+      },
+      "total": {
+        "cached_bytes": 2225202,
+        "disk_bytes": 4846649952,
+        "expected_cache_bytes": 2226952,
+        "ram_bytes": 0,
+        "working_set_bytes": 2226952
+      }
+    },
+    "muvera": {
+      "index": {
+        "cached_bytes": 22818087,
+        "disk_bytes": 22820606,
+        "expected_cache_bytes": 22820606,
+        "ram_bytes": 0,
+        "working_set_bytes": 22820606
+      },
+      "name": "muvera",
+      "storage": {
+        "cached_bytes": 21419319398,
+        "disk_bytes": 21420367974,
+        "expected_cache_bytes": 21420367974,
+        "ram_bytes": 0,
+        "working_set_bytes": 21420367974
+      },
+      "total": {
+        "cached_bytes": 21442137485,
+        "disk_bytes": 21443188580,
+        "expected_cache_bytes": 21443188580,
+        "ram_bytes": 0,
+        "working_set_bytes": 21443188580
+      }
+    }
+  },
+  "source": "qdrant /collections/{name}/memory",
+  "total": {
+    "cached_bytes": 22288934175,
+    "disk_bytes": 27639117939,
+    "expected_cache_bytes": 22279443019,
+    "ram_bytes": 85230891,
+    "working_set_bytes": 22364673910
+  },
+  "vectors": {
+    "dense": {
+      "index": {
+        "cached_bytes": 23413830,
+        "disk_bytes": 29691257,
+        "expected_cache_bytes": 29691257,
+        "ram_bytes": 0,
+        "working_set_bytes": 29691257
+      },
+      "name": "dense",
+      "storage": {
+        "cached_bytes": 803287654,
+        "disk_bytes": 804336230,
+        "expected_cache_bytes": 804336230,
+        "ram_bytes": 0,
+        "working_set_bytes": 804336230
+      },
+      "total": {
+        "cached_bytes": 826701484,
+        "disk_bytes": 834027487,
+        "expected_cache_bytes": 834027487,
+        "ram_bytes": 0,
+        "working_set_bytes": 834027487
+      }
+    },
+    "late_interaction": {
+      "index": {
+        "cached_bytes": 2224686,
+        "disk_bytes": 2226952,
+        "expected_cache_bytes": 2226952,
+        "ram_bytes": 0,
+        "working_set_bytes": 2226952
+      },
+      "name": "late_interaction",
+      "storage": {
+        "cached_bytes": 516,
+        "disk_bytes": 4844423000,
+        "expected_cache_bytes": 0,
+        "ram_bytes": 0,
+        "working_set_bytes": 0
+      },
+      "total": {
+        "cached_bytes": 2225202,
+        "disk_bytes": 4846649952,
+        "expected_cache_bytes": 2226952,
+        "ram_bytes": 0,
+        "working_set_bytes": 2226952
+      }
+    },
+    "muvera": {
+      "index": {
+        "cached_bytes": 22818087,
+        "disk_bytes": 22820606,
+        "expected_cache_bytes": 22820606,
+        "ram_bytes": 0,
+        "working_set_bytes": 22820606
+      },
+      "name": "muvera",
+      "storage": {
+        "cached_bytes": 21419319398,
+        "disk_bytes": 21420367974,
+        "expected_cache_bytes": 21420367974,
+        "ram_bytes": 0,
+        "working_set_bytes": 21420367974
+      },
+      "total": {
+        "cached_bytes": 21442137485,
+        "disk_bytes": 21443188580,
+        "expected_cache_bytes": 21443188580,
+        "ram_bytes": 0,
+        "working_set_bytes": 21443188580
+      }
+    }
+  }
+}

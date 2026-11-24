@@ -1,0 +1,62 @@
+{
+  "bag_recall_at": {
+    "10": 0.006000000000000001,
+    "100": 0.04400000000000001,
+    "1000": 0.2499999999999999,
+    "200": 0.086,
+    "25": 0.013999999999999999,
+    "50": 0.019999999999999997,
+    "500": 0.14199999999999996
+  },
+  "beats_bag_of_tokens": true,
+  "config": {
+    "allow_uncalibrated": false,
+    "calibrated": false,
+    "calibrated_model": null,
+    "calibration_depth": 500,
+    "calibration_note": "Gated per dataset by its own calibration artifact rather than by this flag, so every dataset must earn the arm on its own held-out queries. With mean-centering these settings reach recall@deepest-depth 0.92 on NFCorpus and 0.85 on SciFact; without it the same settings reach 0.68 and the arm is not usable at all.",
+    "center": true,
+    "d_proj": 16,
+    "distance": "cosine",
+    "k_sim": 4,
+    "min_recall": 0.8,
+    "n_reps": 40,
+    "require_calibration": false,
+    "source_tokens": "late_interaction",
+    "tuning_grid": {
+      "d_proj": [
+        16,
+        32
+      ],
+      "datasets": [
+        "nfcorpus",
+        "scifact"
+      ],
+      "k_sim": [
+        4,
+        5,
+        6
+      ],
+      "n_reps": [
+        20,
+        40
+      ]
+    }
+  },
+  "corpus": "scifact, all 5183 documents",
+  "dim": 10240,
+  "late_interaction_model": "lightonai/LateOn",
+  "n_documents": 5183,
+  "n_queries": 50,
+  "queries": "50 held-out warmup queries",
+  "recall_at": {
+    "10": 0.38600000000000023,
+    "100": 0.7799999999999998,
+    "1000": 0.9779999999999999,
+    "200": 0.8499999999999999,
+    "25": 0.574,
+    "50": 0.682,
+    "500": 0.9379999999999998
+  },
+  "spearman_vs_chamfer": 0.6580666546558145
+}

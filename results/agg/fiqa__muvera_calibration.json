@@ -1,0 +1,62 @@
+{
+  "bag_recall_at": {
+    "10": 0.002,
+    "100": 0.01,
+    "1000": 0.04600000000000001,
+    "200": 0.012,
+    "25": 0.002,
+    "50": 0.008,
+    "500": 0.024000000000000004
+  },
+  "beats_bag_of_tokens": true,
+  "config": {
+    "allow_uncalibrated": false,
+    "calibrated": false,
+    "calibrated_model": null,
+    "calibration_depth": 500,
+    "calibration_note": "Gated per dataset by its own calibration artifact rather than by this flag, so every dataset must earn the arm on its own held-out queries. With mean-centering these settings reach recall@deepest-depth 0.92 on NFCorpus and 0.85 on SciFact; without it the same settings reach 0.68 and the arm is not usable at all.",
+    "center": true,
+    "d_proj": 16,
+    "distance": "cosine",
+    "k_sim": 4,
+    "min_recall": 0.8,
+    "n_reps": 40,
+    "require_calibration": false,
+    "source_tokens": "late_interaction",
+    "tuning_grid": {
+      "d_proj": [
+        16,
+        32
+      ],
+      "datasets": [
+        "nfcorpus",
+        "scifact"
+      ],
+      "k_sim": [
+        4,
+        5,
+        6
+      ],
+      "n_reps": [
+        20,
+        40
+      ]
+    }
+  },
+  "corpus": "fiqa, all 57638 documents",
+  "dim": 10240,
+  "late_interaction_model": "lightonai/LateOn",
+  "n_documents": 57638,
+  "n_queries": 50,
+  "queries": "50 held-out warmup queries",
+  "recall_at": {
+    "10": 0.122,
+    "100": 0.364,
+    "1000": 0.8699999999999999,
+    "200": 0.526,
+    "25": 0.19999999999999993,
+    "50": 0.252,
+    "500": 0.754
+  },
+  "spearman_vs_chamfer": 0.603116731624759
+}
