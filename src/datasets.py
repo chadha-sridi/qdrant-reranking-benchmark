@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 
@@ -159,7 +159,9 @@ def _render(template: str, title: str, text: str) -> str:
     return template.format(title=(title or "").strip(), text=(text or "").strip()).strip()
 
 
-def load_dataset_bundle(cfg: Config, dataset_name: str, *, cache_dir: Path | None = None) -> LoadedDataset:
+def load_dataset_bundle(
+    cfg: Config, dataset_name: str, *, cache_dir: Path | None = None
+) -> LoadedDataset:
     """Load corpus, queries, and qrels; subsample; split; build and persist the ID map."""
     from datasets import load_dataset as hf_load  # heavy import, deferred
 
@@ -179,7 +181,9 @@ def load_dataset_bundle(cfg: Config, dataset_name: str, *, cache_dir: Path | Non
         for row in corpus
     ]
 
-    raw_queries = hf_load(spec.hf_corpus, "queries", split="queries", revision=spec.hf_corpus_revision)
+    raw_queries = hf_load(
+        spec.hf_corpus, "queries", split="queries", revision=spec.hf_corpus_revision
+    )
     all_queries = {str(row["_id"]): str(row["text"]) for row in raw_queries}
 
     qrels = _load_qrels(hf_load, spec)
@@ -188,9 +192,11 @@ def load_dataset_bundle(cfg: Config, dataset_name: str, *, cache_dir: Path | Non
     # Only queries that have judgements are usable; an unjudged query silently drags
     # every arm's mean down by an identical amount, which hides nothing but wastes
     # the run.
-    judged = [qid for qid in all_queries if qid in qrels and qrels[qid]]
+    judged = [qid for qid in all_queries if qrels.get(qid)]
     if not judged:
-        raise QrelsError(f"{dataset_name}: no queries have judgements in split {spec.qrels_split!r}")
+        raise QrelsError(
+            f"{dataset_name}: no queries have judgements in split {spec.qrels_split!r}"
+        )
 
     cap = spec.query_cap if spec.query_cap is not None else cfg.run.queries.cap
     subsample = _subsample(judged, cap, cfg.run.seeds.query_subsample)

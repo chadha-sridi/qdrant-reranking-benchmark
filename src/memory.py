@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import json
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
 
 from .config import Config
 
@@ -46,7 +46,7 @@ class Component:
         return self.ram_bytes + self.expected_cache_bytes
 
     @classmethod
-    def parse(cls, raw: dict | None) -> "Component":
+    def parse(cls, raw: dict | None) -> Component:
         raw = raw or {}
         return cls(
             disk_bytes=int(raw.get("disk_bytes") or 0),

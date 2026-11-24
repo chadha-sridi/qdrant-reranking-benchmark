@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.arms import ArmContext, REGISTRY
+from src.arms import REGISTRY, ArmContext
 from src.indexing import build_client, create_collection, embed_corpus, upsert_documents
 from src.metrics import PRIMARY_METRIC, build_run_dict, evaluate_quality
 

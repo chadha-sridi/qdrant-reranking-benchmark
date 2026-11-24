@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from typing import ClassVar
 
 import pytest
 from pydantic import ValidationError
@@ -25,7 +26,6 @@ from src.metrics import (
 from src.runner import build_plan
 from src.storage import RawRecord, RawWriter, completed_keys, repair_truncated, unit_slug
 from src.timing import EMBED_STAGES, QueryTimers
-
 
 # ------------------------------------------------------------------------ config
 
@@ -105,7 +105,9 @@ def test_muvera_calibration_counts_only_for_the_model_it_was_calibrated_on(tmp_p
     cfg = load_config().with_results_dir(str(tmp_path))
     model = cfg.models.late_interaction.name
     assert muvera_calibration_status(_with_muvera_calibrated_for(cfg, model), "nfcorpus")[0]
-    switched = _with_late_interaction_model(_with_muvera_calibrated_for(cfg, model), "some/other-model")
+    switched = _with_late_interaction_model(
+        _with_muvera_calibrated_for(cfg, model), "some/other-model"
+    )
     ok, reason = muvera_calibration_status(switched, "nfcorpus")
     assert not ok and "calibrate-muvera" in reason
 
@@ -129,7 +131,10 @@ def test_muvera_calibration_counts_only_for_the_model_it_was_calibrated_on(tmp_p
     ok, reason = muvera_calibration_status(cfg, "nfcorpus")
     assert not ok and "calibrated with" in reason
 
-    below = passing | {"late_interaction_model": model, "recall_at": {"100": muvera.min_recall - 0.01}}
+    below = passing | {
+        "late_interaction_model": model,
+        "recall_at": {"100": muvera.min_recall - 0.01},
+    }
     artifact.write_text(json.dumps(below))
     assert not muvera_calibration_status(cfg, "nfcorpus")[0]
 
@@ -293,9 +298,7 @@ def test_centred_and_uncentred_muvera_vectors_never_share_a_cache_entry(tmp_path
     cache = EmbeddingCache(tmp_path)
 
     def key(config, **kw):
-        return muvera_cache_key(
-            config, build_encoders(config), cache, "nfcorpus", "digest", **kw
-        )
+        return muvera_cache_key(config, build_encoders(config), cache, "nfcorpus", "digest", **kw)
 
     assert key(cfg) != key(off)
     assert key(cfg) != key(cfg, bounds=(0, 10))
@@ -311,8 +314,7 @@ def test_muvera_parallel_encoding_matches_serial():
     cfg = load_config().models.muvera.model_copy(update={"k_sim": 2, "d_proj": 4, "n_reps": 2})
     rng = np.random.default_rng(0)
     docs = [
-        rng.standard_normal((int(rng.integers(3, 30)), 16)).astype(np.float32)
-        for _ in range(40)
+        rng.standard_normal((int(rng.integers(3, 30)), 16)).astype(np.float32) for _ in range(40)
     ]
     serial = encode_documents(cfg, 16, 123, docs, workers=1)
     parallel = encode_documents(cfg, 16, 123, docs, workers=3)
@@ -326,10 +328,7 @@ def test_vectorized_chamfer_matches_the_per_document_loop():
     from src.muvera import chamfer_blocks, chamfer_similarity, exact_chamfer_scores
 
     rng = np.random.default_rng(1)
-    docs = [
-        rng.standard_normal((int(rng.integers(1, 9)), 8)).astype(np.float32)
-        for _ in range(23)
-    ]
+    docs = [rng.standard_normal((int(rng.integers(1, 9)), 8)).astype(np.float32) for _ in range(23)]
     query = rng.standard_normal((5, 8)).astype(np.float32)
     blocks = chamfer_blocks(docs, max_block_tokens=40)  # force several blocks
     assert len(blocks) > 1
@@ -345,7 +344,10 @@ def test_only_required_representations_are_built():
     assert required_representations([REGISTRY["dense"], REGISTRY["cross_encoder"]]) == {"dense"}
     assert required_representations([REGISTRY["bm25_cross_encoder"]]) == {"bm25"}
     assert required_representations(list(REGISTRY.values())) == {
-        "dense", "bm25", "late_interaction", "muvera",
+        "dense",
+        "bm25",
+        "late_interaction",
+        "muvera",
     }
 
 
@@ -365,7 +367,11 @@ def test_late_interaction_config_rejects_nonzero_m():
 
     with pytest.raises(ValueError, match="hnsw_m must be 0"):
         LateInteractionModel(
-            name="x", dim=128, distance="cosine", hnsw_m=16, comparator="max_sim",
+            name="x",
+            dim=128,
+            distance="cosine",
+            hnsw_m=16,
+            comparator="max_sim",
         )
 
 
@@ -421,7 +427,10 @@ def test_dataset_set_is_the_agreed_five_with_quora_out_of_the_default_set():
     cfg = load_config()
     assert set(cfg.datasets.datasets) == {"nfcorpus", "scifact", "scidocs", "fiqa", "quora"}
     assert [s.name for s in cfg.datasets.enabled_ordered] == [
-        "nfcorpus", "scifact", "scidocs", "fiqa",
+        "nfcorpus",
+        "scifact",
+        "scidocs",
+        "fiqa",
     ]
     quora = cfg.datasets.get("quora")
     assert not quora.enabled
@@ -492,8 +501,13 @@ def test_registry_has_two_baselines_their_rerankers_and_no_fusion_arms():
     from src.arms import REGISTRY
 
     assert set(REGISTRY) == {
-        "dense", "late_interaction_rescore", "muvera_late_interaction_rescore", "cross_encoder",
-        "bm25", "bm25_late_interaction_rescore", "bm25_cross_encoder",
+        "dense",
+        "late_interaction_rescore",
+        "muvera_late_interaction_rescore",
+        "cross_encoder",
+        "bm25",
+        "bm25_late_interaction_rescore",
+        "bm25_cross_encoder",
     }
     assert not {"rrf", "rrf_weighted", "dbsf", "formula_rrf"} & set(REGISTRY)
     # Every arm except the baselines sweeps candidate depth.
@@ -525,8 +539,11 @@ def test_pool_doc_ids_declared_only_where_cheap_or_meaningful():
     from src.arms import REGISTRY
 
     exposes_pool = {
-        "late_interaction_rescore", "muvera_late_interaction_rescore", "cross_encoder",
-        "bm25_late_interaction_rescore", "bm25_cross_encoder",
+        "late_interaction_rescore",
+        "muvera_late_interaction_rescore",
+        "cross_encoder",
+        "bm25_late_interaction_rescore",
+        "bm25_cross_encoder",
     }
     no_pool = {"dense", "bm25"}
     assert exposes_pool | no_pool == set(REGISTRY)
@@ -561,8 +578,12 @@ def test_pool_doc_ids_capture_is_untimed_and_config_gated():
         grpc_points = FakeGrpcPoints()
 
     ctx = ArmContext(
-        client=FakeClient(), cfg=cfg, encoders=None, id_map=id_map,
-        collection="c", dataset="d",
+        client=FakeClient(),
+        cfg=cfg,
+        encoders=None,
+        id_map=id_map,
+        collection="c",
+        dataset="d",
     )
     assert _pool_doc_ids(ctx, query=[0.1], using="muvera", depth=10) == ["docA", "docB"]
     assert len(calls) == 1
@@ -571,12 +592,22 @@ def test_pool_doc_ids_capture_is_untimed_and_config_gated():
     assert "timers" not in inspect.signature(_pool_doc_ids).parameters
 
     # Disabled via config: no call at all, not merely an untimed one.
-    disabled = cfg.model_copy(update={"run": cfg.run.model_copy(update={
-        "execution": cfg.run.execution.model_copy(update={"capture_pool_recall": False})
-    })})
+    disabled = cfg.model_copy(
+        update={
+            "run": cfg.run.model_copy(
+                update={
+                    "execution": cfg.run.execution.model_copy(update={"capture_pool_recall": False})
+                }
+            )
+        }
+    )
     ctx_disabled = ArmContext(
-        client=FakeClient(), cfg=disabled, encoders=None, id_map=id_map,
-        collection="c", dataset="d",
+        client=FakeClient(),
+        cfg=disabled,
+        encoders=None,
+        id_map=id_map,
+        collection="c",
+        dataset="d",
     )
     assert _pool_doc_ids(ctx_disabled, query=[0.1], using="muvera", depth=10) is None
     assert len(calls) == 1, "disabled must not issue the call at all"
@@ -607,7 +638,9 @@ def _with_dataset_depths(cfg, dataset: str, depths: list[int]):
     """A copy of `cfg` where one dataset carries its own depth override."""
     spec = cfg.datasets.get(dataset).model_copy(update={"depths": depths})
     datasets = dict(cfg.datasets.datasets) | {dataset: spec}
-    return cfg.model_copy(update={"datasets": cfg.datasets.model_copy(update={"datasets": datasets})})
+    return cfg.model_copy(
+        update={"datasets": cfg.datasets.model_copy(update={"datasets": datasets})}
+    )
 
 
 def test_per_dataset_depths_fall_back_to_the_global_sweep():
@@ -762,15 +795,21 @@ def test_query_message_accepts_arm_vocabulary_and_rejects_unknown_arguments():
 
     cfg = load_config()
     ctx = ArmContext(
-        client=None, cfg=cfg, encoders=None,
-        id_map=IdMap.build("d", ["docA"]), collection="c", dataset="d",
+        client=None,
+        cfg=cfg,
+        encoders=None,
+        id_map=IdMap.build("d", ["docA"]),
+        collection="c",
+        dataset="d",
     )
 
     msg = _query_message(
         ctx,
         prefetch=[models.Prefetch(query=[0.1, 0.2], using="dense", limit=50)],
-        query=[[0.1, 0.2], [0.3, 0.4]],           # multivector, as late_interaction arms send
-        using="late_interaction", limit=10, with_payload=["doc_id"],
+        query=[[0.1, 0.2], [0.3, 0.4]],  # multivector, as late_interaction arms send
+        using="late_interaction",
+        limit=10,
+        with_payload=["doc_id"],
         params=models.SearchParams(hnsw_ef=128),
     )
     assert msg.collection_name == "c"
@@ -780,14 +819,19 @@ def test_query_message_accepts_arm_vocabulary_and_rejects_unknown_arguments():
     assert msg.params.hnsw_ef == 128
 
     # A bare (non-multivector) query is accepted too.
-    assert _query_message(
-        ctx, query=[0.1, 0.2], using="dense", limit=5, with_payload=["doc_id"]
-    ).limit == 5
+    assert (
+        _query_message(ctx, query=[0.1, 0.2], using="dense", limit=5, with_payload=["doc_id"]).limit
+        == 5
+    )
 
     # An argument it does not model must fail loudly, not vanish.
     with pytest.raises(TypeError):
         _query_message(
-            ctx, query=[0.1], using="dense", limit=5, with_payload=["doc_id"],
+            ctx,
+            query=[0.1],
+            using="dense",
+            limit=5,
+            with_payload=["doc_id"],
             score_threshold=0.9,
         )
 
@@ -856,9 +900,7 @@ def test_verify_ingestion_rejects_an_unindexed_collection():
                     "Cfg",
                     (),
                     {
-                        "optimizer_config": type(
-                            "O", (), {"indexing_threshold": threshold}
-                        )(),
+                        "optimizer_config": type("O", (), {"indexing_threshold": threshold})(),
                         "params": type("P", (), {"vectors": {"dense": params}})(),
                     },
                 )(),
@@ -951,7 +993,9 @@ def test_point_from_chunk_uses_global_index_for_the_document_and_local_index_for
 
     chunk_start, chunk_end = 5, 10  # second chunk of a 5-doc-per-chunk split
     # Distinguishable per-position values so a local/global index mix-up is visible.
-    chunk_vectors = DocumentVectors(dense=np.arange(chunk_start, chunk_end).reshape(-1, 1).astype("float32"))
+    chunk_vectors = DocumentVectors(
+        dense=np.arange(chunk_start, chunk_end).reshape(-1, 1).astype("float32")
+    )
 
     global_i = 7  # doc7, third position in this chunk (local_i = 2)
     point = _point_from_chunk(bundle, chunk_vectors, ["dense"], global_i, chunk_start)
@@ -984,7 +1028,7 @@ def test_bm25_indexes_the_payload_key_documents_are_stored_under():
     from src.indexing import DocumentVectors, _point_from_chunk
 
     class FakeBundle:
-        documents = [Document(doc_id="d0", text="some text")]
+        documents: ClassVar[list[Document]] = [Document(doc_id="d0", text="some text")]
         id_map = IdMap.build("fake", ["d0"])
 
     point = _point_from_chunk(FakeBundle(), DocumentVectors(), [], 0, 0)
@@ -1018,7 +1062,11 @@ def test_collection_without_the_bm25_index_is_rebuilt_not_resumed():
         return SimpleNamespace(get_collection=lambda name: info)
 
     def index(params):
-        return {field: models.PayloadIndexInfo(data_type=models.PayloadSchemaType.TEXT, params=params, points=1)}
+        return {
+            field: models.PayloadIndexInfo(
+                data_type=models.PayloadSchemaType.TEXT, params=params, points=1
+            )
+        }
 
     assert _config_matches(client_with(index(bm25_index_params(cfg))), cfg, spec, "c", reps)
     assert not _config_matches(client_with({}), cfg, spec, "c", reps)
@@ -1092,7 +1140,10 @@ def test_payload_index_memory_is_read_per_field_and_mapped_to_bm25():
 
     cfg = load_config()
     memory = CollectionMemory(
-        dataset="d", collection="c", n_documents=1, n_token_vectors=None,
+        dataset="d",
+        collection="c",
+        n_documents=1,
+        n_token_vectors=None,
         payload_indexes={cfg.models.bm25.field: Component(disk_bytes=7, ram_bytes=3)},
     )
     reported = representation_memory(cfg, memory)
@@ -1180,7 +1231,7 @@ def test_cache_key_differs_per_chunk_bounds():
     from src.embedding import EmbeddingCache
 
     cache = EmbeddingCache.__new__(EmbeddingCache)  # key() touches no disk
-    common = dict(representation="dense", model_name="m", dataset="d", corpus_digest="x")
+    common = {"representation": "dense", "model_name": "m", "dataset": "d", "corpus_digest": "x"}
     key_a = cache.key(**common, extra={"chunk_start": 0, "chunk_end": 100})
     key_b = cache.key(**common, extra={"chunk_start": 100, "chunk_end": 200})
     assert key_a != key_b
@@ -1322,7 +1373,9 @@ def test_timers_accumulate_independently():
 
 def test_embed_time_is_bucketed_per_encoder_and_summed():
     """Each encoder's query-side cost is recorded on its own; t_embed_ms is their sum."""
-    timers = QueryTimers(t_embed_dense_ms=1.0, t_embed_late_interaction_ms=2.0, t_embed_muvera_ms=4.0)
+    timers = QueryTimers(
+        t_embed_dense_ms=1.0, t_embed_late_interaction_ms=2.0, t_embed_muvera_ms=4.0
+    )
     assert timers.t_embed_ms == pytest.approx(7.0)
     payload = timers.as_dict()
     assert payload["t_embed_dense_ms"] == 1.0
@@ -1333,14 +1386,14 @@ def test_embed_time_is_bucketed_per_encoder_and_summed():
 
 
 def test_embed_rejects_an_unknown_stage():
-    with pytest.raises(ValueError, match="unknown embed stage"):
-        with QueryTimers().embed("sparse"):
-            pass
+    with pytest.raises(ValueError, match="unknown embed stage"), QueryTimers().embed("sparse"):
+        pass
 
 
 def test_every_arm_buckets_its_query_embedding():
     """No arm may use an unbucketed embed timer: every encoder call names its stage."""
     import re
+
     from src import arms as arms_module
 
     source = inspect.getsource(arms_module)
@@ -1387,8 +1440,13 @@ def test_query_client_always_uses_grpc():
     cfg = load_config()
     assert build_client(cfg, for_queries=True)._client._prefer_grpc is True
     # Even if the configured transport were REST, a query client still needs gRPC.
-    rest_cfg = cfg.model_copy(update={"run": cfg.run.model_copy(update={
-        "qdrant": cfg.run.qdrant.model_copy(update={"prefer_grpc": False})})})
+    rest_cfg = cfg.model_copy(
+        update={
+            "run": cfg.run.model_copy(
+                update={"qdrant": cfg.run.qdrant.model_copy(update={"prefer_grpc": False})}
+            )
+        }
+    )
     assert build_client(rest_cfg, for_queries=True)._client._prefer_grpc is True
     assert build_client(rest_cfg, for_queries=False)._client._prefer_grpc is False
 
@@ -1403,9 +1461,8 @@ def test_latency_components_include_the_server_split():
 def test_timers_record_time_even_on_exception():
     """A failed call still cost wall-clock time; dropping it would understate latency."""
     timers = QueryTimers()
-    with pytest.raises(RuntimeError):
-        with timers.qdrant():
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), timers.qdrant():
+        raise RuntimeError("boom")
     assert timers.t_qdrant_ms > 0
 
 
@@ -1414,7 +1471,10 @@ def test_timers_record_time_even_on_exception():
 
 def test_unit_slug_uses_none_not_zero_for_non_sweeping_arms():
     assert unit_slug("nfcorpus", "dense", None) == "nfcorpus__dense__depth-none"
-    assert unit_slug("nfcorpus", "late_interaction_rescore", 100) == "nfcorpus__late_interaction_rescore__depth-100"
+    assert (
+        unit_slug("nfcorpus", "late_interaction_rescore", 100)
+        == "nfcorpus__late_interaction_rescore__depth-100"
+    )
 
 
 def test_raw_writer_appends_and_resume_reads_back(tmp_path):
@@ -1453,8 +1513,13 @@ def test_truncated_final_line_is_survivable(tmp_path):
 def test_raw_record_json_carries_every_timer():
     payload = json.loads(
         RawRecord(
-            query_id="q", arm="dense", dataset="nfcorpus", depth=100, run_idx=0,
-            retrieved=[("d1", 1.0)], timers=QueryTimers(t_embed_dense_ms=1.0, t_qdrant_ms=2.0),
+            query_id="q",
+            arm="dense",
+            dataset="nfcorpus",
+            depth=100,
+            run_idx=0,
+            retrieved=[("d1", 1.0)],
+            timers=QueryTimers(t_embed_dense_ms=1.0, t_qdrant_ms=2.0),
         ).to_json()
     )
     assert set(LATENCY_COMPONENTS) <= payload.keys()
@@ -1507,7 +1572,12 @@ def test_recall_at_100_is_unsupported_below_depth_100():
 
 def test_latency_percentiles_cover_every_component():
     records = [
-        {"t_embed_ms": float(i), "t_qdrant_ms": float(i * 2), "t_rerank_ms": 0.0, "t_total_ms": float(i * 3)}
+        {
+            "t_embed_ms": float(i),
+            "t_qdrant_ms": float(i * 2),
+            "t_rerank_ms": 0.0,
+            "t_total_ms": float(i * 3),
+        }
         for i in range(1, 101)
     ]
     from src.metrics import PERCENTILES
@@ -1590,7 +1660,9 @@ def test_collection_larger_than_server_memory_is_refused():
     from src.memory import MemoryReadError, check_fits_in_memory
 
     with pytest.raises(MemoryReadError, match="disk-bound"):
-        check_fits_in_memory(_collection_with_working_set(6.4), server_memory_bytes=int(1.9 * 1024**3))
+        check_fits_in_memory(
+            _collection_with_working_set(6.4), server_memory_bytes=int(1.9 * 1024**3)
+        )
 
 
 def test_fit_check_leaves_headroom_for_qdrant_itself():

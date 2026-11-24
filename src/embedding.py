@@ -9,16 +9,15 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Sequence
 
 import numpy as np
 
 from .config import Config, CrossEncoderModel, DenseModel, ModelsConfig
 from .muvera import build_muvera
 from .platform_info import assert_same_platform, current_platform, file_digest, stable_digest
-
 
 # ----------------------------------------------------------------------- encoders
 
@@ -89,7 +88,9 @@ class Encoders:
         out = list(self.dense.embed(list(texts), batch_size=batch_size))
         return np.asarray(out, dtype=np.float32)
 
-    def embed_docs_late_interaction(self, texts: Sequence[str], batch_size: int = 16) -> list[np.ndarray]:
+    def embed_docs_late_interaction(
+        self, texts: Sequence[str], batch_size: int = 16
+    ) -> list[np.ndarray]:
         return [
             np.asarray(tokens, dtype=np.float32)
             for tokens in self.late_interaction.embed(list(texts), batch_size=batch_size)
@@ -113,9 +114,7 @@ def _register_onnx_reranker(cross: CrossEncoderModel) -> None:
     from fastembed.common.model_description import ModelSource
     from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-    if any(
-        entry["model"] == cross.model_id for entry in TextCrossEncoder.list_supported_models()
-    ):
+    if any(entry["model"] == cross.model_id for entry in TextCrossEncoder.list_supported_models()):
         return
     TextCrossEncoder.add_custom_model(
         model=cross.model_id,
@@ -145,7 +144,9 @@ def _fastembed_cache_roots() -> list[Path]:
     import os
 
     candidates = [
-        Path(os.environ.get("FASTEMBED_CACHE_PATH", "")) if os.environ.get("FASTEMBED_CACHE_PATH") else None,
+        Path(os.environ.get("FASTEMBED_CACHE_PATH", ""))
+        if os.environ.get("FASTEMBED_CACHE_PATH")
+        else None,
         Path.home() / ".cache" / "fastembed",
         Path("/tmp/fastembed_cache"),
     ]
@@ -242,9 +243,7 @@ class EmbeddingCache:
             return None
         with np.load(path) as data:
             flat, offsets, dim = data["flat"], data["offsets"], int(data["dim"])
-        return [
-            flat[offsets[i] : offsets[i + 1]].reshape(-1, dim) for i in range(len(offsets) - 1)
-        ]
+        return [flat[offsets[i] : offsets[i + 1]].reshape(-1, dim) for i in range(len(offsets) - 1)]
 
     def save_late_interaction(self, key: str, matrices: list[np.ndarray], meta: dict) -> None:
         dim = matrices[0].shape[1] if matrices else 0
@@ -301,4 +300,3 @@ def resolve_dense_model_dim(model_name: str) -> int:
         f"could not resolve the output dimension for dense model {model_name!r} from "
         "FastEmbed's supported-model list. Pass --dense-model-dim explicitly."
     )
-

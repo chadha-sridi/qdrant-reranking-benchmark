@@ -73,15 +73,24 @@ class QdrantController:
         )
         result = subprocess.run(
             [
-                "docker", "run", "-d",
-                "--name", self.container,
-                "-p", "6333:6333",
-                "-p", f"{cfg.grpc_port}:6334",
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                self.container,
+                "-p",
+                "6333:6333",
+                "-p",
+                f"{cfg.grpc_port}:6334",
                 # Same named volume as compose, so both launchers see one storage.
-                "-v", f"{self.volume}:/qdrant/storage",
-                "-e", "QDRANT__LOG_LEVEL=WARN",
-                "-e", "QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS=4",
-                "-e", "QDRANT__TELEMETRY_DISABLED=true",
+                "-v",
+                f"{self.volume}:/qdrant/storage",
+                "-e",
+                "QDRANT__LOG_LEVEL=WARN",
+                "-e",
+                "QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS=4",
+                "-e",
+                "QDRANT__TELEMETRY_DISABLED=true",
                 cfg.image,
             ],
             capture_output=True,
@@ -171,7 +180,14 @@ class QdrantController:
 
     def image_digest(self) -> str | None:
         out = subprocess.run(
-            ["docker", "image", "inspect", self.cfg.run.qdrant.image, "--format", "{{index .RepoDigests 0}}"],
+            [
+                "docker",
+                "image",
+                "inspect",
+                self.cfg.run.qdrant.image,
+                "--format",
+                "{{index .RepoDigests 0}}",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -181,6 +197,9 @@ class QdrantController:
 
 def _command_ok(cmd: list[str]) -> bool:
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=20).returncode == 0
+        return (
+            subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=20).returncode
+            == 0
+        )
     except (OSError, subprocess.SubprocessError):
         return False

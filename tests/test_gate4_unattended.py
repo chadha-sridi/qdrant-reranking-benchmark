@@ -90,7 +90,9 @@ def test_gate4_resume_is_idempotent(scoped, encoders, nfcorpus_collection):
 
     cfg, bundle = scoped
     first = run_dataset(cfg, bundle, encoders, nfcorpus_collection, resume=True, log=lambda m: None)
-    second = run_dataset(cfg, bundle, encoders, nfcorpus_collection, resume=True, log=lambda m: None)
+    second = run_dataset(
+        cfg, bundle, encoders, nfcorpus_collection, resume=True, log=lambda m: None
+    )
 
     assert second.n_records_written == 0, (
         f"Gate 4 FAILED: a resumed run wrote {second.n_records_written} additional records "

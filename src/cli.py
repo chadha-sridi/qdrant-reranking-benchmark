@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Optional
+from typing import Annotated
 
 import numpy as np
 import typer
@@ -30,13 +30,13 @@ def _echo(message: str) -> None:
     typer.echo(message)
 
 
-def _parse_arms(arms: str, cfg) -> Optional[list[str]]:
+def _parse_arms(arms: str, cfg) -> list[str] | None:
     if arms.strip().lower() == "all":
         return None
     return [name.strip() for name in arms.split(",") if name.strip()]
 
 
-def _parse_depths(depths: Optional[str]) -> Optional[list[int]]:
+def _parse_depths(depths: str | None) -> list[int] | None:
     if not depths:
         return None
     return [int(part.strip()) for part in depths.split(",") if part.strip()]
@@ -44,12 +44,20 @@ def _parse_depths(depths: Optional[str]) -> Optional[list[int]]:
 
 @app.command()
 def run(
-    dataset: Annotated[str, typer.Option(help="Dataset name, or 'all' for the default set. Naming a dataset explicitly runs it even if it is out of that set.")] = "nfcorpus",
+    dataset: Annotated[
+        str,
+        typer.Option(
+            help="Dataset name, or 'all' for the default set. Naming a dataset explicitly runs it even if it is out of that set."
+        ),
+    ] = "nfcorpus",
     arms: Annotated[str, typer.Option(help="Comma-separated arm names, or 'all'")] = "all",
-    depths: Annotated[Optional[str], typer.Option(help="Override the depth sweep, e.g. 10,50,100")] = None,
+    depths: Annotated[
+        str | None, typer.Option(help="Override the depth sweep, e.g. 10,50,100")
+    ] = None,
     resume: Annotated[bool, typer.Option(help="Skip records already on disk")] = True,
     overwrite: Annotated[
-        bool, typer.Option(help="With --no-resume, first delete this dataset's existing raw records")
+        bool,
+        typer.Option(help="With --no-resume, first delete this dataset's existing raw records"),
     ] = False,
     measure_memory: Annotated[
         bool,
@@ -64,40 +72,56 @@ def run(
     ] = False,
     allow_unverified_baseline: Annotated[
         bool,
-        typer.Option(help="Proceed even though the default dense model's Gate 1 reference is unverified"),
+        typer.Option(
+            help="Proceed even though the default dense model's Gate 1 reference is unverified"
+        ),
     ] = False,
     dense_model: Annotated[
-        Optional[str],
-        typer.Option(help="Override the dense first-stage model the dense-family arms rerank (default: config/models.yaml)"),
+        str | None,
+        typer.Option(
+            help="Override the dense first-stage model the dense-family arms rerank (default: config/models.yaml)"
+        ),
     ] = None,
     dense_model_dim: Annotated[
-        Optional[int],
-        typer.Option(help="Dimension of --dense-model, if it can't be auto-resolved from FastEmbed's registry"),
+        int | None,
+        typer.Option(
+            help="Dimension of --dense-model, if it can't be auto-resolved from FastEmbed's registry"
+        ),
     ] = None,
     analyse: Annotated[bool, typer.Option(help="Aggregate after the run completes")] = True,
     allow_partial: Annotated[
         bool,
-        typer.Option(help="Aggregate even if some (arm, depth) units end up with incomplete records. Never use this for a result you intend to trust."),
+        typer.Option(
+            help="Aggregate even if some (arm, depth) units end up with incomplete records. Never use this for a result you intend to trust."
+        ),
     ] = False,
     allow_disk_bound: Annotated[
         bool,
-        typer.Option(help="Run even when a collection's working set does not fit in Qdrant's memory. Its latency is then disk-bound for the large-vector arms only."),
+        typer.Option(
+            help="Run even when a collection's working set does not fit in Qdrant's memory. Its latency is then disk-bound for the large-vector arms only."
+        ),
     ] = False,
     results_dir: Annotated[
-        Optional[str],
-        typer.Option(help="Write raw records, aggregates, query samples and the manifest here instead of results/ (relative to the repo root). The embedding cache is shared."),
+        str | None,
+        typer.Option(
+            help="Write raw records, aggregates, query samples and the manifest here instead of results/ (relative to the repo root). The embedding cache is shared."
+        ),
     ] = None,
     cross_encoder_model: Annotated[
-        Optional[str],
-        typer.Option(help="Override the cross-encoder the *_cross_encoder arms rerank with. Either a FastEmbed model name, or HF_REPO:onnx/file.onnx to register one FastEmbed does not ship."),
+        str | None,
+        typer.Option(
+            help="Override the cross-encoder the *_cross_encoder arms rerank with. Either a FastEmbed model name, or HF_REPO:onnx/file.onnx to register one FastEmbed does not ship."
+        ),
     ] = None,
     muvera_setting: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(help="Override MUVERA's k_sim,d_proj,n_reps for this run, e.g. 4,16,40"),
     ] = None,
     allow_uncalibrated_muvera: Annotated[
         bool,
-        typer.Option(help="Run muvera_late_interaction_rescore without a passing calibration, to measure it end to end. Recorded in the manifest."),
+        typer.Option(
+            help="Run muvera_late_interaction_rescore without a passing calibration, to measure it end to end. Recorded in the manifest."
+        ),
     ] = False,
 ) -> None:
     """Index, measure memory, execute the interleaved plan, and aggregate."""
@@ -138,7 +162,9 @@ def run(
         from .embedding import resolve_dense_model_dim
 
         default_dense_model = cfg.models.dense.name
-        dim = dense_model_dim if dense_model_dim is not None else resolve_dense_model_dim(dense_model)
+        dim = (
+            dense_model_dim if dense_model_dim is not None else resolve_dense_model_dim(dense_model)
+        )
         cfg = cfg.model_copy(
             update={
                 "models": cfg.models.model_copy(
@@ -168,14 +194,20 @@ def run(
                 "leaderboard and flip the flag, or pass --allow-unverified-baseline to "
                 "proceed anyway."
             )
-        _echo("WARNING: proceeding with an unverified Gate 1 baseline (--allow-unverified-baseline).")
+        _echo(
+            "WARNING: proceeding with an unverified Gate 1 baseline (--allow-unverified-baseline)."
+        )
 
     run_all = dataset.strip().lower() == "all"
     names = [spec.name for spec in cfg.datasets.enabled_ordered] if run_all else [dataset]
     requested_arms = _parse_arms(arms, cfg)
 
     if not resume and not overwrite:
-        existing = list(cfg.paths["raw"].glob(f"{'*' if dataset.strip().lower() == 'all' else dataset}__*.jsonl"))
+        existing = list(
+            cfg.paths["raw"].glob(
+                f"{'*' if dataset.strip().lower() == 'all' else dataset}__*.jsonl"
+            )
+        )
         if existing:
             raise typer.BadParameter(
                 f"--no-resume with existing raw records for {dataset!r} would append into "
@@ -225,7 +257,14 @@ def run(
         # which is how the ones kept out of `--dataset all` for cost are run on demand.
         if not spec.enabled and run_all:
             _echo(f"[skip] {name}: {spec.disabled_reason or 'not in the default set'}")
-            merge(manifest_path, {"exclusions": {name: {"__dataset__": spec.disabled_reason or "not in the default set"}}})
+            merge(
+                manifest_path,
+                {
+                    "exclusions": {
+                        name: {"__dataset__": spec.disabled_reason or "not in the default set"}
+                    }
+                },
+            )
             continue
 
         _echo(f"\n=== {name} ===")
@@ -257,9 +296,13 @@ def run(
         representations = [r for r in bundle.spec.representations if r in needed]
         _echo(f"  building the collection every arm queries ({', '.join(representations)})")
         collection = build_collection(
-            cfg, bundle, encoders, controller,
+            cfg,
+            bundle,
+            encoders,
+            controller,
             representations=representations,
-            restart=not resume_ingestion, resume=resume_ingestion,
+            restart=not resume_ingestion,
+            resume=resume_ingestion,
         )
 
         # After the build, not before: Qdrant reports memory per named vector for the
@@ -297,8 +340,13 @@ def run(
             _echo(f"  muvera calibration: {'PASS' if passed else 'FAIL'} — {reason}")
 
         summary = run_dataset(
-            cfg, bundle, encoders, collection,
-            include_arms=requested_arms, resume=resume, log=_echo,
+            cfg,
+            bundle,
+            encoders,
+            collection,
+            include_arms=requested_arms,
+            resume=resume,
+            log=_echo,
         )
         _echo(
             f"  wrote {summary.n_records_written} records "
@@ -351,10 +399,12 @@ def aggregate(
     dataset: Annotated[str, typer.Option(help="Dataset name, or 'all'")] = "nfcorpus",
     allow_partial: Annotated[
         bool,
-        typer.Option(help="Aggregate even if some (arm, depth) units have incomplete records. Never use this for a result you intend to trust."),
+        typer.Option(
+            help="Aggregate even if some (arm, depth) units have incomplete records. Never use this for a result you intend to trust."
+        ),
     ] = False,
     results_dir: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(help="Read and write under this results directory instead of results/"),
     ] = None,
 ) -> None:
@@ -387,9 +437,7 @@ def memory(
     controller.up()
     encoders = build_encoders(cfg)
     bundle = load_dataset_bundle(cfg, dataset)
-    collection = build_collection(
-        cfg, bundle, encoders, controller, restart=False, resume=True
-    )
+    collection = build_collection(cfg, bundle, encoders, controller, restart=False, resume=True)
     memory_read = read_collection_memory(
         cfg,
         collection,
@@ -405,8 +453,10 @@ def memory(
 @app.command("tune-muvera")
 def tune_muvera(
     results_dir: Annotated[
-        Optional[str],
-        typer.Option(help="Write the tuning record and query splits under this directory instead of results/"),
+        str | None,
+        typer.Option(
+            help="Write the tuning record and query splits under this directory instead of results/"
+        ),
     ] = None,
 ) -> None:
     """Sweep models.yaml's pre-declared MUVERA grid on held-out warmup queries.
@@ -504,14 +554,21 @@ def tune_muvera(
         "and beats bag-of-tokens on every tuning dataset, on held-out warmup queries",
         "selected": None
         if selected is None
-        else {"k_sim": selected.k_sim, "d_proj": selected.d_proj, "n_reps": selected.n_reps, "dim": selected.dim},
+        else {
+            "k_sim": selected.k_sim,
+            "d_proj": selected.d_proj,
+            "n_reps": selected.n_reps,
+            "dim": selected.dim,
+        },
         "rows": rows,
     }
     out = cfg.paths["agg"] / "muvera_tuning.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(record, indent=2, sort_keys=True))
     if selected is None:
-        _echo(f"\nno setting in the grid reaches recall {muvera_cfg.min_recall:.2f} on every tuning dataset")
+        _echo(
+            f"\nno setting in the grid reaches recall {muvera_cfg.min_recall:.2f} on every tuning dataset"
+        )
     else:
         _echo(
             f"\nselected: k_sim={selected.k_sim} d_proj={selected.d_proj} "
@@ -524,8 +581,10 @@ def tune_muvera(
 def calibrate_muvera(
     dataset: Annotated[str, typer.Option()] = "nfcorpus",
     results_dir: Annotated[
-        Optional[str],
-        typer.Option(help="Write the calibration artifact and query split under this directory instead of results/"),
+        str | None,
+        typer.Option(
+            help="Write the calibration artifact and query split under this directory instead of results/"
+        ),
     ] = None,
 ) -> None:
     """Measure FDE prefetch recall against exact max_sim on REAL late-interaction embeddings.
@@ -631,7 +690,7 @@ def doctor() -> None:
                 else "unknown (docker info failed)"
             )
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # doctor reports any failure
         _echo(f"qdrant            : NOT ready ({exc}). Run: docker compose up -d")
 
     ref = cfg.models.dense.reference

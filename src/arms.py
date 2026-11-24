@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Sequence
 
 import numpy as np
 from qdrant_client import QdrantClient, models
@@ -59,7 +59,7 @@ class ArmContext:
     # The corpus mean token vector the collection's MUVERA vectors were centered on.
     # Queries must be centered on the same vector or the two sides no longer share a
     # coordinate system. None when muvera.center is off.
-    muvera_mean: "np.ndarray | None" = None
+    muvera_mean: np.ndarray | None = None
 
 
 @dataclass
@@ -179,8 +179,13 @@ def _pool_doc_ids(ctx: ArmContext, *, query, using: str, depth: int) -> list[str
         return None
     scratch = QueryTimers()
     points = run_query(
-        ctx, scratch, map_ids=False,
-        query=query, using=using, limit=depth, with_payload=["doc_id"],
+        ctx,
+        scratch,
+        map_ids=False,
+        query=query,
+        using=using,
+        limit=depth,
+        with_payload=["doc_id"],
     )
     return [ctx.id_map.doc(p.id) for p in points]
 
@@ -258,9 +263,7 @@ def run_query(ctx: ArmContext, timers: QueryTimers, *, map_ids: bool = True, **k
     """
     request = _query_message(ctx, **kwargs)
     with timers.qdrant():
-        response = ctx.client.grpc_points.Query(
-            request, timeout=ctx.cfg.run.qdrant.timeout_s
-        )
+        response = ctx.client.grpc_points.Query(request, timeout=ctx.cfg.run.qdrant.timeout_s)
         timers.add_server_time(response.time)
         points = [GrpcToRest.convert_scored_point(hit) for hit in response.result]
         return _to_retrieved(points, ctx.id_map) if map_ids else points
@@ -269,7 +272,9 @@ def run_query(ctx: ArmContext, timers: QueryTimers, *, map_ids: bool = True, **k
 # ---------------------------------------------------------------------- baselines
 
 
-def _first_stage_search(ctx: ArmContext, query: str, depth: int | None, *, first_stage: str) -> ArmOutput:
+def _first_stage_search(
+    ctx: ArmContext, query: str, depth: int | None, *, first_stage: str
+) -> ArmOutput:
     """A first stage on its own, with no reranking: the baseline for its family."""
     timers = QueryTimers()
     limit = _final_limit(ctx, depth)
@@ -305,7 +310,9 @@ def bm25_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
 # than rescore a candidate set; so are sharding and formula-rescore machinery.
 
 
-def _late_interaction_rescore(ctx: ArmContext, query: str, depth: int | None, *, first_stage: str) -> ArmOutput:
+def _late_interaction_rescore(
+    ctx: ArmContext, query: str, depth: int | None, *, first_stage: str
+) -> ArmOutput:
     """`first_stage` prefetch, then late-interaction max_sim rescoring inside Qdrant."""
     if depth is None:
         raise ArmError("late-interaction rescoring sweeps depth; depth must be set")
@@ -360,7 +367,9 @@ def bm25_late_interaction_rescore_arm(ctx: ArmContext, query: str, depth: int | 
     group="rescoring",
     baseline="dense",
 )
-def muvera_late_interaction_rescore_arm(ctx: ArmContext, query: str, depth: int | None) -> ArmOutput:
+def muvera_late_interaction_rescore_arm(
+    ctx: ArmContext, query: str, depth: int | None
+) -> ArmOutput:
     """MUVERA FDE prefetch, then exact late-interaction max_sim rescoring inside Qdrant."""
     if depth is None:
         raise ArmError("muvera_late_interaction_rescore sweeps depth; depth must be set")
@@ -388,7 +397,9 @@ def muvera_late_interaction_rescore_arm(ctx: ArmContext, query: str, depth: int 
     return ArmOutput(retrieved, timers, pool_doc_ids=pool)
 
 
-def _cross_encoder(ctx: ArmContext, query: str, depth: int | None, *, first_stage: str) -> ArmOutput:
+def _cross_encoder(
+    ctx: ArmContext, query: str, depth: int | None, *, first_stage: str
+) -> ArmOutput:
     """`first_stage` candidate generation, then scoring in the Python process.
 
     Architecturally different from the server-side arms: Qdrant returns candidates and
@@ -406,8 +417,13 @@ def _cross_encoder(ctx: ArmContext, query: str, depth: int | None, *, first_stag
     _guard_prefetch(depth, limit)
     first_stage_vec, using = first_stage_query(ctx, timers, first_stage, query)
     candidates = run_query(
-        ctx, timers, map_ids=False, query=first_stage_vec, using=using,
-        limit=depth, with_payload=["doc_id", "text"],
+        ctx,
+        timers,
+        map_ids=False,
+        query=first_stage_vec,
+        using=using,
+        limit=depth,
+        with_payload=["doc_id", "text"],
     )
 
     doc_ids = [ctx.id_map.doc(p.id) for p in candidates]

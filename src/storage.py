@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Self
 
 from .timing import QueryTimers
 
@@ -46,7 +47,7 @@ class RawRecord:
             "run_idx": self.run_idx,
             "retrieved": [[doc_id, score] for doc_id, score in self.retrieved],
             **self.timers.as_dict(),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
         if self.extra:
             payload.update(self.extra)
@@ -92,7 +93,7 @@ class RawWriter:
         self._handles.clear()
         self._pending.clear()
 
-    def __enter__(self) -> RawWriter:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -110,7 +111,9 @@ def completed_keys(root: Path, dataset: str) -> set[tuple[str, int | None, str, 
         return done
     for path in sorted(root.glob(f"{dataset}__*.jsonl")):
         for line in _iter_valid_lines(path):
-            done.add((line["arm"], line.get("depth"), line["query_id"], int(line.get("run_idx", 0))))
+            done.add(
+                (line["arm"], line.get("depth"), line["query_id"], int(line.get("run_idx", 0)))
+            )
     return done
 
 

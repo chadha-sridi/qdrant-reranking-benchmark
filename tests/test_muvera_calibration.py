@@ -18,6 +18,7 @@ import pytest
 
 pytestmark = [pytest.mark.gate, pytest.mark.slow]
 
+
 @pytest.fixture(scope="module")
 def calibration(cfg, nfcorpus, encoders):
     from src.muvera import calibrate, calibration_inputs

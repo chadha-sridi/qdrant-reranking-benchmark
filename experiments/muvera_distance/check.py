@@ -18,8 +18,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path.cwd()))
 
-from src.cli import build_encoders, load_config, load_dataset_bundle  # noqa: E402
-from src.muvera import (  # noqa: E402
+from src.cli import build_encoders, load_config, load_dataset_bundle
+from src.muvera import (
     build_muvera,
     calibration_inputs,
     chamfer_blocks,
@@ -80,8 +80,11 @@ def main() -> None:
         res["seconds"] = round(time.time() - start)
         results[dataset] = res
         OUT.write_text(json.dumps(results, indent=2))
-        print(f"== {dataset} ({res['n_documents']} docs, {res['n_queries']} queries, "
-              f"{res['seconds']} s, doc FDE norm CV {res['doc_fde_norm_cv']:.3f})", flush=True)
+        print(
+            f"== {dataset} ({res['n_documents']} docs, {res['n_queries']} queries, "
+            f"{res['seconds']} s, doc FDE norm CV {res['doc_fde_norm_cv']:.3f})",
+            flush=True,
+        )
         for depth in DEPTHS:
             d, c = res["recall_at"]["dot"][str(depth)], res["recall_at"]["cosine"][str(depth)]
             print(f"  depth {depth:>4}: dot {d:.3f}  cosine {c:.3f}  diff {c - d:+.3f}", flush=True)

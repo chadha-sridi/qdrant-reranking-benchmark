@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import itertools
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -255,9 +255,7 @@ def latency_percentiles(records: Sequence[dict]) -> dict[str, float | None]:
             key = f"{component}_p{pct}"
             out[key] = float(np.percentile(values, pct)) if values.size else None
         out[f"{component}_mean"] = float(values.mean()) if values.size else None
-    out["n_latency_samples"] = float(
-        len([r for r in records if r.get("t_total_ms") is not None])
-    )
+    out["n_latency_samples"] = float(len([r for r in records if r.get("t_total_ms") is not None]))
     return out
 
 
@@ -279,11 +277,13 @@ def aggregate(
     frame["depth"] = frame["depth"].where(frame["depth"].notna(), None)
     rows = []
 
-    for (dataset, arm, depth), group in frame.groupby(
-        ["dataset", "arm", "depth"], dropna=False
-    ):
+    for (dataset, arm, depth), group in frame.groupby(["dataset", "arm", "depth"], dropna=False):
         group_records = group.to_dict("records")
-        depth_value = None if depth is None or (isinstance(depth, float) and math.isnan(depth)) else int(depth)
+        depth_value = (
+            None
+            if depth is None or (isinstance(depth, float) and math.isnan(depth))
+            else int(depth)
+        )
 
         run = build_run_dict(group_records, run_idx=0)
         quality = evaluate_quality(qrels, run, depth=depth_value)

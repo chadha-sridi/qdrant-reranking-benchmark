@@ -19,9 +19,9 @@ which is the one comparison this whole project exists to make.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
 
 # One bucket per query encoder. `muvera` is the FDE transform applied to the
 # late-interaction token vectors, not a model call of its own, so an arm that uses it

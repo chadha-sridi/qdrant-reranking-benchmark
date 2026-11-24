@@ -25,7 +25,7 @@ def controller(cfg):
     ctl = QdrantController(cfg)
     try:
         ctl.wait_ready(timeout_s=5)
-    except Exception:
+    except Exception:  # noqa: BLE001  # any failure means no live Qdrant
         pytest.skip("live Qdrant not available; start it with `docker compose up -d`")
     return ctl
 
@@ -51,7 +51,7 @@ def nfcorpus(cfg):
 
     try:
         return load_dataset_bundle(cfg, "nfcorpus")
-    except Exception as exc:  # network/HF-hub failures land here, not just ImportError
+    except Exception as exc:  # noqa: BLE001  # network and HF Hub failures land here
         pytest.skip(f"could not load nfcorpus (offline, or HF Hub unreachable?): {exc}")
 
 

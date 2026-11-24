@@ -22,8 +22,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path.cwd()))
 
-from src.cli import build_encoders, load_config, load_dataset_bundle  # noqa: E402
-from src.muvera import (  # noqa: E402
+from src.cli import build_encoders, load_config, load_dataset_bundle
+from src.muvera import (
     build_muvera,
     calibration_inputs,
     chamfer_blocks,
@@ -90,14 +90,19 @@ def main() -> None:
         res["seconds"] = round(time.time() - start)
         results[dataset] = res
         OUT.write_text(json.dumps(results, indent=2))
-        print(f"== {dataset} ({res['n_documents']} docs, {res['n_queries']} queries, "
-              f"{res['seconds']} s)", flush=True)
+        print(
+            f"== {dataset} ({res['n_documents']} docs, {res['n_queries']} queries, "
+            f"{res['seconds']} s)",
+            flush=True,
+        )
         r = res["recall_at"]
         for depth in DEPTHS:
             k = str(depth)
-            print(f"  depth {depth:>4}: FDE {r['fde_cosine'][k]:.3f}  "
-                  f"mean centered {r['mean_centered'][k]:.3f}  mean raw {r['mean_raw'][k]:.3f}",
-                  flush=True)
+            print(
+                f"  depth {depth:>4}: FDE {r['fde_cosine'][k]:.3f}  "
+                f"mean centered {r['mean_centered'][k]:.3f}  mean raw {r['mean_raw'][k]:.3f}",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

@@ -80,7 +80,9 @@ def check_completeness(cfg: Config, bundle: LoadedDataset, records: list[dict]) 
     return incomplete
 
 
-def analyse_dataset(cfg: Config, bundle: LoadedDataset, *, allow_partial: bool = False) -> dict[str, Path]:
+def analyse_dataset(
+    cfg: Config, bundle: LoadedDataset, *, allow_partial: bool = False
+) -> dict[str, Path]:
     """Write the aggregate CSV, the depth curve, and the significance table.
 
     Refuses on incomplete data unless `allow_partial=True` — pass it explicitly to
@@ -95,8 +97,7 @@ def analyse_dataset(cfg: Config, bundle: LoadedDataset, *, allow_partial: bool =
     incomplete = check_completeness(cfg, bundle, records)
     if incomplete and not allow_partial:
         lines = "\n".join(
-            f"  {unit}: {info['found']}/{info['expected']} records "
-            f"({info['missing']} missing)"
+            f"  {unit}: {info['found']}/{info['expected']} records ({info['missing']} missing)"
             for unit, info in sorted(incomplete.items())
         )
         raise IncompleteRunError(

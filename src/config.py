@@ -93,7 +93,7 @@ class HnswConfig(_Frozen):
     full_scan_threshold_kb: int = 10
 
     @model_validator(mode="after")
-    def _threshold_is_accepted_by_qdrant(self) -> "HnswConfig":
+    def _threshold_is_accepted_by_qdrant(self) -> HnswConfig:
         if self.full_scan_threshold_kb < 10:
             raise ValueError(
                 f"full_scan_threshold_kb={self.full_scan_threshold_kb} is rejected by "
@@ -432,7 +432,7 @@ class Config(_Frozen):
         cap = self.run.execution.arm_depth_caps.get(arm)
         return depths if cap is None else [d for d in depths if d <= cap]
 
-    def with_depths_override(self, depths: list[int]) -> "Config":
+    def with_depths_override(self, depths: list[int]) -> Config:
         """Force `depths` everywhere, including over every dataset's own override.
 
         A plain global-depths update is not enough: `depths_for()` checks a dataset's
@@ -442,7 +442,8 @@ class Config(_Frozen):
         every arm, which is what makes a deep diagnostic run on the capped arms possible.
         """
         cleared = {
-            name: spec.model_copy(update={"depths": None}) for name, spec in self.datasets.datasets.items()
+            name: spec.model_copy(update={"depths": None})
+            for name, spec in self.datasets.datasets.items()
         }
         return self.model_copy(
             update={
@@ -457,7 +458,7 @@ class Config(_Frozen):
             }
         )
 
-    def with_results_dir(self, results: str) -> "Config":
+    def with_results_dir(self, results: str) -> Config:
         """Write every run output (raw, agg, queries, manifest) under `results` instead.
 
         Keeps a new run from touching a recorded one. The embedding cache stays where it
@@ -472,7 +473,10 @@ class Config(_Frozen):
         paths = current.model_copy(
             update={
                 "results": results,
-                **{key: moved(getattr(current, key)) for key in ("raw", "agg", "queries", "manifest")},
+                **{
+                    key: moved(getattr(current, key))
+                    for key in ("raw", "agg", "queries", "manifest")
+                },
             }
         )
         return self.model_copy(update={"run": self.run.model_copy(update={"paths": paths})})
@@ -486,7 +490,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     with path.open() as fh:
         data = yaml.safe_load(fh)
     if not isinstance(data, dict):
-        raise ValueError(f"{path} must contain a mapping")
+        raise TypeError(f"{path} must contain a mapping")
     return data
 
 

@@ -8,15 +8,16 @@ Per-vector memory is read off that same collection by `memory.py`.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 from qdrant_client import QdrantClient, models
 
 from .config import Config, DatasetSpec
 from .datasets import LoadedDataset, iter_batches
-from .embedding import Encoders, EmbeddingCache
+from .embedding import EmbeddingCache, Encoders
 from .qdrant_control import QdrantController
 
 
@@ -87,7 +88,8 @@ def embed_corpus(
             cached_late_interaction = encoders.embed_docs_late_interaction(texts)
             out.timings["late_interaction"] = time.perf_counter() - start
             cache.save_late_interaction(
-                key, cached_late_interaction,
+                key,
+                cached_late_interaction,
                 {"model": cfg.models.late_interaction.name, "dataset": name},
             )
         out.n_token_vectors = int(sum(m.shape[0] for m in cached_late_interaction))
@@ -105,8 +107,11 @@ def embed_corpus(
             from .muvera import encode_documents
 
             cached_muvera = encode_documents(
-                cfg.models.muvera, cfg.models.late_interaction.dim, cfg.run.seeds.muvera,
-                source, mean=muvera_token_mean(cfg, bundle, encoders, cache),
+                cfg.models.muvera,
+                cfg.models.late_interaction.dim,
+                cfg.run.seeds.muvera,
+                source,
+                mean=muvera_token_mean(cfg, bundle, encoders, cache),
                 workers=cfg.run.ingestion.muvera_workers or None,
             )
             out.timings["muvera"] = time.perf_counter() - start
@@ -123,9 +128,7 @@ def embed_corpus(
 # ---------------------------------------------------------------- collections
 
 
-def _dense_params(
-    cfg: Config, dim: int, distance: models.Distance
-) -> models.VectorParams:
+def _dense_params(cfg: Config, dim: int, distance: models.Distance) -> models.VectorParams:
     """Params for a single-vector (non-multivector) named vector."""
     return models.VectorParams(
         size=dim,
@@ -225,7 +228,9 @@ def token_vector_count(cfg: Config, bundle: LoadedDataset) -> int | None:
     """
     cache = EmbeddingCache(cfg.paths["cache"])
     total = 0
-    for chunk_start, chunk_end in _chunk_bounds(len(bundle.documents), cfg.run.ingestion.chunk_size):
+    for chunk_start, chunk_end in _chunk_bounds(
+        len(bundle.documents), cfg.run.ingestion.chunk_size
+    ):
         key = _chunk_late_interaction_cache_key(cfg, bundle, cache, chunk_start, chunk_end)
         meta = cache.meta(key)
         if meta is None or meta.get("n_token_vectors") is None:
@@ -256,9 +261,7 @@ def _distance(name: str) -> models.Distance:
     }[name]
 
 
-def vectors_config(
-    cfg: Config, spec: DatasetSpec, representations: Sequence[str]
-) -> dict:
+def vectors_config(cfg: Config, spec: DatasetSpec, representations: Sequence[str]) -> dict:
     """Named-vector config.
 
     Every vector is stored and read at full precision, so all arms sharing one collection
@@ -431,9 +434,7 @@ def upsert_documents(
     for position, batch in enumerate(batches):
         points = [_point(bundle, vectors, representations, i) for i in batch]
         # The final batch waits, so the count check below cannot race an in-flight write.
-        client.upsert(
-            collection_name=name, points=points, wait=position == len(batches) - 1
-        )
+        client.upsert(collection_name=name, points=points, wait=position == len(batches) - 1)
 
     _finish_indexing(client, cfg, name, expected_points=total)
     return time.perf_counter() - start
@@ -460,9 +461,7 @@ def _finish_indexing(client: QdrantClient, cfg: Config, name: str, *, expected_p
     verify_ingestion(client, name, expected_points=expected_points)
 
 
-def _missing_point_indices(
-    client: QdrantClient, name: str, ids: Sequence[int]
-) -> list[int]:
+def _missing_point_indices(client: QdrantClient, name: str, ids: Sequence[int]) -> list[int]:
     """Which of `ids` are absent from the collection, checked in bounded-size batches."""
     present: set[int] = set()
     for batch in iter_batches(list(ids), 1000):
@@ -610,7 +609,8 @@ def _embed_chunk(
         if cached_late_interaction is None:
             cached_late_interaction = encoders.embed_docs_late_interaction(texts)
             cache.save_late_interaction(
-                key, cached_late_interaction,
+                key,
+                cached_late_interaction,
                 {"model": cfg.models.late_interaction.name, "dataset": name},
             )
         out.n_token_vectors = int(sum(m.shape[0] for m in cached_late_interaction))
@@ -618,9 +618,7 @@ def _embed_chunk(
             out.late_interaction = cached_late_interaction
 
     if "muvera" in representations:
-        key = muvera_cache_key(
-            cfg, encoders, cache, name, digest, bounds=(chunk_start, chunk_end)
-        )
+        key = muvera_cache_key(cfg, encoders, cache, name, digest, bounds=(chunk_start, chunk_end))
         cached_muvera = cache.load_dense(key)
         if cached_muvera is None:
             if cached_late_interaction is None:
@@ -628,8 +626,11 @@ def _embed_chunk(
             from .muvera import encode_documents
 
             cached_muvera = encode_documents(
-                cfg.models.muvera, cfg.models.late_interaction.dim, cfg.run.seeds.muvera,
-                cached_late_interaction, mean=muvera_mean,
+                cfg.models.muvera,
+                cfg.models.late_interaction.dim,
+                cfg.run.seeds.muvera,
+                cached_late_interaction,
+                mean=muvera_mean,
                 workers=cfg.run.ingestion.muvera_workers or None,
             )
             cache.save_dense(
@@ -672,16 +673,24 @@ def muvera_token_mean(
         len(bundle.documents), cfg.run.ingestion.chunk_size
     ):
         chunk = _embed_chunk(
-            cfg, bundle, encoders, ["late_interaction"], cache,
-            chunk_start=chunk_start, chunk_end=chunk_end,
+            cfg,
+            bundle,
+            encoders,
+            ["late_interaction"],
+            cache,
+            chunk_start=chunk_start,
+            chunk_end=chunk_end,
         )
         mean.update(chunk.require("late_interaction"))
     result = mean.result()
     cache.save_dense(
         key,
         result[None, :],
-        {"model": cfg.models.late_interaction.name, "dataset": bundle.spec.name,
-         "kind": "muvera_token_mean"},
+        {
+            "model": cfg.models.late_interaction.name,
+            "dataset": bundle.spec.name,
+            "kind": "muvera_token_mean",
+        },
     )
     return result
 
@@ -693,10 +702,17 @@ def late_interaction_corpus(
     `run` writes; chunks not cached yet are embedded and cached."""
     cache = EmbeddingCache(cfg.paths["cache"])
     tokens: list[np.ndarray] = []
-    for chunk_start, chunk_end in _chunk_bounds(len(bundle.documents), cfg.run.ingestion.chunk_size):
+    for chunk_start, chunk_end in _chunk_bounds(
+        len(bundle.documents), cfg.run.ingestion.chunk_size
+    ):
         chunk = _embed_chunk(
-            cfg, bundle, encoders, ["late_interaction"], cache,
-            chunk_start=chunk_start, chunk_end=chunk_end,
+            cfg,
+            bundle,
+            encoders,
+            ["late_interaction"],
+            cache,
+            chunk_start=chunk_start,
+            chunk_end=chunk_end,
         )
         tokens.extend(chunk.require("late_interaction"))
     return tokens
@@ -746,8 +762,14 @@ def ingest_corpus(
             continue
 
         chunk_vectors = _embed_chunk(
-            cfg, bundle, encoders, representations, cache,
-            chunk_start=chunk_start, chunk_end=chunk_end, muvera_mean=muvera_mean,
+            cfg,
+            bundle,
+            encoders,
+            representations,
+            cache,
+            chunk_start=chunk_start,
+            chunk_end=chunk_end,
+            muvera_mean=muvera_mean,
         )
         batch_size = safe_batch_size(cfg, chunk_vectors, representations, chunk_end - chunk_start)
         for batch in iter_batches(missing, batch_size):
@@ -814,9 +836,7 @@ def build_collection(
         print(f"  {collection}: existing collection does not match this config; rebuilding")
 
     if not reusable:
-        create_collection(
-            client, cfg, bundle.spec, collection, reps, shard_number=shard_number
-        )
+        create_collection(client, cfg, bundle.spec, collection, reps, shard_number=shard_number)
     ingest_corpus(client, cfg, bundle, collection, reps, encoders, resume=reusable)
     client.close()
     return collection
@@ -838,7 +858,7 @@ def _config_matches(
     """
     try:
         info = client.get_collection(name)
-    except Exception:
+    except Exception:  # noqa: BLE001  # any lookup failure means no reusable collection
         return False
     existing = info.config.params.vectors or {}
     wanted = vectors_config(cfg, spec, representations)

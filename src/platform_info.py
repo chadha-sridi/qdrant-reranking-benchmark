@@ -48,10 +48,10 @@ class PlatformInfo:
 
 def _onnx_providers() -> tuple[str, ...]:
     try:
-        import onnxruntime  # noqa: PLC0415  (optional at import time)
+        import onnxruntime
 
         return tuple(onnxruntime.get_available_providers())
-    except Exception:
+    except ImportError:
         return ()
 
 
@@ -73,7 +73,7 @@ def _cpu_model() -> str:
                 for line in cpuinfo.read_text().splitlines():
                     if line.startswith("model name"):
                         return line.split(":", 1)[1].strip()
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         pass
     return platform.processor() or "unknown"
 

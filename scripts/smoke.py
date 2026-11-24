@@ -73,7 +73,10 @@ def main() -> None:
     log(f"collection built: {collection}")
 
     summary = run_dataset(
-        cfg, bundle, encoders, collection,
+        cfg,
+        bundle,
+        encoders,
+        collection,
         include_arms=["dense", "late_interaction_rescore"],
         resume=True,
         log=log,

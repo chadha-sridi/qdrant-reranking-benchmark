@@ -37,7 +37,9 @@ def test_gate1_reference_is_verified(cfg, baseline):
 
 
 @pytest.mark.parametrize("baseline", BASELINES)
-def test_gate1_baseline_matches_published_ndcg(cfg, nfcorpus, encoders, nfcorpus_collection, baseline):
+def test_gate1_baseline_matches_published_ndcg(
+    cfg, nfcorpus, encoders, nfcorpus_collection, baseline
+):
     ref = getattr(cfg.models, baseline).reference
     assert ref.dataset == "nfcorpus", "Gate 1 is defined against nfcorpus"
 
