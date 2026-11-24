@@ -62,9 +62,9 @@ bm25:
     verified: true
 
 late_interaction:
-  # Chosen over answerai-colbert-small-v1 and mLateOn on NFCorpus, each model at its own
-  # context window (DECISIONS.md O6). Runs on ONNX Runtime through FastEmbed, like every
-  # other encoder here.
+  # Chosen over answerai-colbert-small-v1 and mLateOn in a pilot on NFCorpus, each model
+  # at its own context window. Runs on ONNX Runtime through FastEmbed, like every other
+  # encoder here.
   name: "lightonai/LateOn"
   dim: 128
   distance: cosine
@@ -74,10 +74,9 @@ late_interaction:
 
 muvera:
   # fastembed.postprocess.Muvera — the reference implementation the MUVERA/Qdrant
-  # ecosystem uses. k_sim/n_reps/d_proj are fastembed's own defaults (k_sim=5, r_reps=20,
-  # dim_proj=16), matching the Qdrant MUVERA article's NFCorpus/ColBERTv2 benchmark
-  # config. Run `benchmark calibrate-muvera` (real late-interaction embeddings) before
-  # publishing any muvera number, and record the outcome here.
+  # ecosystem uses. k_sim/n_reps/d_proj below come from `tune-muvera`, not fastembed's
+  # defaults (k_sim=5, r_reps=20, dim_proj=16). Run `calibrate-muvera` on each dataset
+  # before trusting its muvera numbers.
   source_tokens: late_interaction
   # Subtract the corpus mean token vector before FDE encoding, on both sides. Late
   # interaction embeddings are anisotropic -- they collapse into a narrow cone -- and
@@ -120,8 +119,9 @@ muvera:
   calibrated: false
   calibrated_model: null
   calibration_note: >-
-    Gated per dataset by its own calibration artifact rather than by this flag, so every
-    dataset must earn the arm on its own held-out queries. With mean-centering these
+    Each dataset's verdict comes from its own calibration artifact rather than this flag,
+    and is recorded in the manifest; with require_calibration false, a failing dataset
+    still runs the arm and is reported. With mean-centering these
     settings reach recall@deepest-depth 0.92 on NFCorpus and 0.85 on SciFact; without it
     the same settings reach 0.68 and the arm is not usable at all.
 

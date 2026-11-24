@@ -6,16 +6,17 @@ uses. This module is a thin wrapper around it, so the question it has to answer 
 "is the algorithm right" but "does the recommended default work well enough to trust as
 a prefetch" — which `calibrate()` below measures on real embeddings.
 
-Defaults match fastembed's own: `k_sim=5, dim_proj=16, r_reps=20` -> output dimension
-`r_reps * 2**k_sim * dim_proj` = 20*32*16 = 10240.
+Output dimension is `r_reps * 2**k_sim * dim_proj`. The configured setting (chosen by
+`tune-muvera`) is `k_sim=4, dim_proj=16, r_reps=40` -> 40*16*16 = 10240, the same size as
+fastembed's defaults (`k_sim=5, dim_proj=16, r_reps=20`).
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-from typing import Sequence
 
 import numpy as np
 
@@ -110,12 +111,13 @@ def encode_documents(
     encoded: list[np.ndarray] = []
     window = batch_size * workers
     with ProcessPoolExecutor(
-        max_workers=workers, initializer=_init_worker,
+        max_workers=workers,
+        initializer=_init_worker,
         initargs=(cfg.model_dump(), token_dim, seed),
     ) as pool:
         for start in range(0, len(doc_tokens), window):
             batches = [
-                (doc_tokens[a:a + batch_size], mean)
+                (doc_tokens[a : a + batch_size], mean)
                 for a in range(start, min(start + window, len(doc_tokens)), batch_size)
             ]
             encoded.extend(pool.map(_encode_slice, batches))
@@ -167,7 +169,7 @@ def matrices_digest(muvera, cfg: MuveraModel, token_dim: int) -> str:
 
 def calibration_inputs(
     cfg, bundle, encoders
-) -> tuple[list[np.ndarray], list[np.ndarray], "np.ndarray | None"]:
+) -> tuple[list[np.ndarray], list[np.ndarray], np.ndarray | None]:
     """Document tokens, held-out warmup query tokens, and the MUVERA centering mean.
 
     Calibration and tuning use only warmup queries, which are never evaluated, so no

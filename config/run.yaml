@@ -29,19 +29,18 @@ execution:
   # relevant-docs-per-query distribution: four of five datasets have every relevant
   # document inside depth 50, so 200 is already ~4x past saturation for them.
   # 500 and 1000 exist for the MUVERA arm, not for quality headroom. MUVERA trades
-  # prefetch accuracy for a single-vector first stage, and its break-even against the
-  # dense baseline sits near depth 100 on SciFact and between 500 and 1000 on NFCorpus
-  # and SciDocs; a ladder that stopped at 200 would cut the curve off just below the
-  # crossover and report the arm as a loss on two datasets out of three. The server-side
-  # arms cost ~20-50 ms/query at any depth, so the two extra rungs add ~15 min across
-  # the whole benchmark. The cross-encoder arms cannot afford them and are capped below.
+  # prefetch accuracy for a single-vector first stage, so it needs a deeper pool to catch
+  # up with the dense baseline: by depth 25-50 on most datasets, but only between 200
+  # and 500 on SCIDOCS. A ladder that stopped at 200 would cut that curve off before the
+  # crossover. The server-side arms cost ~30-55 ms/query at depth 50, so the two extra
+  # rungs are cheap. The cross-encoder arms cannot afford them and are capped below.
   depths: [10, 25, 50, 100, 200, 500, 1000]
   # The cross-encoder scores every candidate with a full transformer forward pass:
-  # ~2.8 pairs/s for gte-reranker-modernbert-base on real abstracts, against ~20-50 ms
-  # for a whole server-side rescore. Sweeping it to 1000 would cost ~155 h, roughly
-  # 95% of the benchmark, to extend a curve that is already flat by depth 50 on every
-  # dataset. Capped at 50, and with share_pointwise_scores on, depths 10 and 25 come
-  # free as subsets of the depth-50 pass.
+  # ~3-4 pairs/s for gte-reranker-modernbert-base on CPU with real abstracts, about 14 s
+  # per query at depth 50, against ~30-55 ms for a whole server-side rescore. Sweeping it
+  # to 1000 would multiply the benchmark's runtime many times over to extend a curve that
+  # is already flat by depth 50. Capped at 50, and with share_pointwise_scores on, depths
+  # 10 and 25 come free as subsets of the depth-50 pass.
   arm_depth_caps:
     cross_encoder: 50
     bm25_cross_encoder: 50
@@ -54,8 +53,8 @@ execution:
   # query's depth sweep and both cross-encoder arms keep re-meeting the same pairs. With
   # sharing on, a pair is scored once per query and its measured cost is attributed to
   # every unit that uses it: identical rankings, ~45% less cross-encoder wall-clock, and
-  # t_rerank_ms stays a measured per-pair figure (throughput is depth-independent,
-  # 28.6-29.1 pairs/s at depths 10-500). Set false for fully isolated executions.
+  # t_rerank_ms stays a measured per-pair figure (throughput per pair does not depend on
+  # depth). Set false for fully isolated executions.
   share_pointwise_scores: true
 
 qdrant:

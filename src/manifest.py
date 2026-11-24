@@ -11,7 +11,7 @@ import json
 import platform
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +23,16 @@ def _installed_versions() -> dict[str, str]:
     from importlib.metadata import PackageNotFoundError, version
 
     packages = [
-        "qdrant-client", "fastembed", "ranx", "datasets", "numpy",
-        "pandas", "psutil", "pydantic", "typer", "scipy",
+        "qdrant-client",
+        "fastembed",
+        "ranx",
+        "datasets",
+        "numpy",
+        "pandas",
+        "psutil",
+        "pydantic",
+        "typer",
+        "scipy",
     ]
     out: dict[str, str] = {}
     for name in packages:
@@ -65,7 +73,7 @@ def base_manifest(
 ) -> dict[str, Any]:
     info = current_platform()
     return {
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "hardware": {
             **info.as_dict(),
             "platform": platform.platform(),
@@ -98,14 +106,20 @@ def base_manifest(
         "git_commit": _git_commit(cfg.root),
         "measurement_caveats": [
             "Latency is unloaded serial latency: one client, one query in flight.",
-            "Memory is Qdrant's own per-collection, per-named-vector accounting for the "
-            "same collection the arms query, so it describes one deployment. The numbers "
-            "are estimates: ram_bytes runs 10-15% low because allocations inside "
-            "third-party libraries are untracked, and cached_bytes is Unix-only.",
-            "MUVERA is an independent FDE implementation, not a reference one; its random "
-            "matrices are seeded and their digest is recorded below.",
-            "Quality metrics come from run_idx 0 only; all timing runs feed the latency "
-            "percentiles.",
+            (
+                "Memory is Qdrant's own per-collection, per-named-vector accounting for the "
+                "same collection the arms query, so it describes one deployment. The numbers "
+                "are estimates: ram_bytes runs 10-15% low because allocations inside "
+                "third-party libraries are untracked, and cached_bytes is Unix-only."
+            ),
+            (
+                "MUVERA FDEs come from fastembed's reference implementation; its random "
+                "matrices are seeded and their digest is recorded below."
+            ),
+            (
+                "Quality metrics come from run_idx 0 only; all timing runs feed the latency "
+                "percentiles."
+            ),
         ],
         "exclusions": {},
         "datasets": {},
@@ -127,7 +141,7 @@ def merge(path: Path, updates: dict[str, Any]) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = json.loads(path.read_text()) if path.exists() else {}
     merged = _deep_merge(existing, updates)
-    merged["updated_at"] = datetime.now(timezone.utc).isoformat()
+    merged["updated_at"] = datetime.now(UTC).isoformat()
     path.write_text(json.dumps(merged, indent=2, sort_keys=True, default=str))
     return merged
 
