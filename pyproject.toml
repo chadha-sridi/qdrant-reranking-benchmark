@@ -20,7 +20,12 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+    "ruff>=0.17.6",
+    "ty>=0.0.109",
+]
 
 [project.scripts]
 benchmark = "src.cli:app"
@@ -41,3 +46,7 @@ markers = [
     "gate: validation gates for the benchmark's correctness invariants",
     "slow: requires a live Qdrant and model downloads",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
